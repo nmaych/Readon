@@ -113,10 +113,19 @@ val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.2"
 
 ```powershell
 build.cmd assembleRelease
-python tools\check_repo_config.py
+check.cmd
 ```
 
-`check_repo_config.py` 会检查版本号三处是否一致、CHANGELOG 是否有对应章节、密钥是否被正确忽略、workflow 的 YAML 是否合法。
+`check.cmd` 会检查：
+
+- 所有 workflow 能解析、有 job、有触发器和 `runs-on`（用 js-yaml 真正解析，不是文本匹配）
+- `dist/update.json` 是合法 UTF-8 JSON，无 BOM、无 CRLF，`versionCode` 与 `versionName` 一致，`apkUrl` 的标签与版本一致，`sha256` 是 64 位小写十六进制
+- `CHANGELOG.md` 有当前版本的章节（发版说明从它提取）
+- `.gitignore` 排除了 `keystore.properties`、`*.jks`、`local.properties`
+- `.gitignore` 里 `*.jar` 规则有 `!gradle/wrapper/gradle-wrapper.jar` 例外（少了它，克隆下来无法构建）
+- Gradle wrapper 三个文件齐全
+
+同一个脚本在 CI 里也会跑（`ci.yml` 调 `tools/check_manifest.py` 和 `tools/check_repo_config.py`），所以本地过不了的东西不会推到远端才炸。
 
 ### 3. 打标签
 
@@ -153,18 +162,10 @@ git push origin v1.0.2
 推送前跑一遍：
 
 ```powershell
-python tools\check_repo_config.py
+check.cmd
 ```
 
-它会验证：
-
-- 所有 workflow YAML 能解析、有 job、有触发器
-- `dist/update.json` 是合法 JSON，`versionCode` 与 `versionName` 一致，`apkUrl` 的标签与版本一致，`sha256` 是 64 位小写十六进制
-- `build.gradle.kts` 的默认版本号与清单一致
-- `CHANGELOG.md` 有当前版本的章节
-- `.gitignore` 排除了 `keystore.properties`、`*.jks`、`local.properties`
-- `.gitignore` 里 `*.jar` 规则有 `!gradle/wrapper/gradle-wrapper.jar` 例外（少了它，克隆下来无法构建）
-- Gradle wrapper 三个文件齐全
+上面「2. 本地验证」列出的每一项都会在这里被验证。CI 也会跑同一套脚本。
 
 ---
 

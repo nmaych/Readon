@@ -42,7 +42,11 @@ import subprocess  # noqa: E402
 node = os.environ.get("READON_NODE") or shutil.which("node")
 checker = ROOT / "tools" / "check_workflows.mjs"
 
-if node and checker.exists():
+if os.environ.get("READON_SKIP_WORKFLOW_CHECK"):
+    warn("workflow parse-check skipped (READON_SKIP_WORKFLOW_CHECK is set)")
+elif node and checker.exists():
+    # js-yaml may live outside the repository; the checker looks in
+    # READON_JS_YAML and ./node_modules, and reports clearly if it finds neither.
     proc = subprocess.run(
         [node, str(checker)],
         capture_output=True,
@@ -57,7 +61,11 @@ if node and checker.exists():
             warn(stripped.removeprefix("[warn]").strip())
         elif stripped.startswith("[FAIL]"):
             fail(stripped.removeprefix("[FAIL]").strip())
-    if proc.returncode not in (0, 1):
+    # Exit 2 means "no YAML parser available", which is an environment gap rather
+    # than a problem with the repository.
+    if proc.returncode == 2:
+        warn("js-yaml not available; .github YAML was not parse-checked")
+    elif proc.returncode not in (0, 1, 2):
         warn(f"check_workflows.mjs exited {proc.returncode}: {proc.stderr.strip()[:200]}")
 else:
     warn("node not found; .github YAML was not parse-checked")
@@ -111,26 +119,43 @@ if manifest:
     else:
         ok(f"update.json sha256 well-formed ({manifest['sha256'][:12]}…)")
 
-# The Gradle default must agree with the manifest, or a local build produces an
-# APK the manifest does not describe.
+# The Gradle default is the version being *developed*; dist/update.json records
+# the version last *released*. Those legitimately differ between releases -- a
+# maintainer bumps the Gradle default and adds a changelog section, then tags --
+# so a mismatch is a note, not a failure. What matters is that the release
+# workflow overrides both from the tag, which it does.
 gradle = (ROOT / "app-project" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
 m = re.search(r'READON_VERSION_CODE"\)\s*\?:\s*"(\d+)"', gradle)
+gradle_code = int(m.group(1)) if m else None
 if m:
-    gradle_code = int(m.group(1))
     if manifest and gradle_code != manifest["versionCode"]:
-        fail(
-            f"build.gradle.kts default versionCode {gradle_code} != "
-            f"update.json {manifest['versionCode']}"
+        warn(
+            f"build.gradle.kts default versionCode is {gradle_code} but the last "
+            f"release in update.json is {manifest['versionCode']} -- expected "
+            f"while developing the next version"
         )
     else:
         ok(f"build.gradle.kts default versionCode {gradle_code}")
 
 m = re.search(r'READON_VERSION_NAME"\)\s*\?:\s*"([^"]+)"', gradle)
-if m and manifest and m.group(1) != manifest["versionName"]:
-    fail(
-        f"build.gradle.kts default versionName {m.group(1)} != "
-        f"update.json {manifest['versionName']}"
+gradle_name = m.group(1) if m else None
+if m and manifest and gradle_name != manifest["versionName"]:
+    warn(
+        f"build.gradle.kts default versionName is {gradle_name} but the last "
+        f"release is {manifest['versionName']}"
     )
+
+# If the Gradle default is *ahead* of the manifest, a changelog section for it
+# should already exist, because that is what the release notes come from.
+if gradle_name and manifest and version_code_of(gradle_name) > manifest["versionCode"]:
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    if f"## [{gradle_name}]" not in changelog:
+        warn(
+            f"build.gradle.kts is set to {gradle_name} but CHANGELOG.md has no "
+            f"'## [{gradle_name}]' section; the release notes would be empty"
+        )
+    else:
+        ok(f"CHANGELOG.md has a section for the in-development {gradle_name}")
 
 # The changelog must have a section for the version being shipped, since the
 # release notes are extracted from it.

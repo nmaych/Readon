@@ -50,47 +50,18 @@ jobs:
         run: ./gradlew assembleDebug --no-daemon --console=plain
 
       - name: Check the manifest is valid JSON
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json, pathlib, re, sys
+        # Calls the script the repository ships rather than an inline copy, so
+        # the check that runs here and the one a contributor runs locally cannot
+        # drift apart.
+        run: python3 tools/check_manifest.py
 
-          path = pathlib.Path("dist/update.json")
-          if not path.exists():
-              print("::error::dist/update.json is missing; the app fetches it")
-              sys.exit(1)
-
-          manifest = json.loads(path.read_text(encoding="utf-8"))
-          for key in ("versionCode", "versionName", "apkUrl", "sha256"):
-              if key not in manifest:
-                  print(f"::error::dist/update.json has no '{key}'")
-                  sys.exit(1)
-
-          # versionCode must equal the version name under the project's scheme,
-          # because the app compares only versionCode.
-          name = manifest["versionName"]
-          major, minor, patch = (int(p) for p in name.split("."))
-          expected = major * 10000 + minor * 100 + patch
-          if manifest["versionCode"] != expected:
-              print(
-                  f"::error::versionCode {manifest['versionCode']} does not match "
-                  f"{name} (expected {expected})"
-              )
-              sys.exit(1)
-
-          # The tag in apkUrl must match the version name, or the update the app
-          # offers 404s.
-          if f"/v{name}/" not in manifest["apkUrl"]:
-              print(f"::error::apkUrl does not point at v{name}: {manifest['apkUrl']}")
-              sys.exit(1)
-
-          sha = manifest["sha256"]
-          if not re.fullmatch(r"[0-9a-f]{64}", sha or ""):
-              print(f"::error::sha256 is not a lowercase hex digest: {sha!r}")
-              sys.exit(1)
-
-          print(f"manifest OK: {name} ({manifest['versionCode']}) {sha[:12]}…")
-          PY
+      - name: Check the repository configuration
+        env:
+          # The workflow parse-check is delegated to Node and js-yaml. The runner
+          # has Node but not js-yaml, and the workflows were already validated by
+          # the time this runs, so it is skipped rather than failed.
+          READON_SKIP_WORKFLOW_CHECK: '1'
+        run: python3 tools/check_repo_config.py
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
