@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or general discussion
+    url: https://github.com/nmaych/Readon/discussions
+    about: For questions that are not a bug report or a concrete feature request.

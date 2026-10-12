@@ -1,0 +1,101 @@
+name: CI
+
+# Compile check on every push and pull request. Deliberately does not sign, does
+# not publish and does not touch dist/update.json -- it only answers "does this
+# still build", which is the question that matters before a tag is cut.
+
+on:
+  push:
+    branches: ['**']
+    tags-ignore: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: sdkmanager --install 'platforms;android-34' 'build-tools;34.0.0'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          validate-wrappers: true
+
+      # No signing inputs are provided on purpose. The build script treats
+      # "all four signing inputs" and "none" as the two valid states, so this
+      # exercises the unsigned path and proves a fresh clone still builds.
+      - name: Assemble debug
+        working-directory: app-project
+        run: ./gradlew assembleDebug --no-daemon --console=plain
+
+      - name: Check the manifest is valid JSON
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, re, sys
+
+          path = pathlib.Path("dist/update.json")
+          if not path.exists():
+              print("::error::dist/update.json is missing; the app fetches it")
+              sys.exit(1)
+
+          manifest = json.loads(path.read_text(encoding="utf-8"))
+          for key in ("versionCode", "versionName", "apkUrl", "sha256"):
+              if key not in manifest:
+                  print(f"::error::dist/update.json has no '{key}'")
+                  sys.exit(1)
+
+          # versionCode must equal the version name under the project's scheme,
+          # because the app compares only versionCode.
+          name = manifest["versionName"]
+          major, minor, patch = (int(p) for p in name.split("."))
+          expected = major * 10000 + minor * 100 + patch
+          if manifest["versionCode"] != expected:
+              print(
+                  f"::error::versionCode {manifest['versionCode']} does not match "
+                  f"{name} (expected {expected})"
+              )
+              sys.exit(1)
+
+          # The tag in apkUrl must match the version name, or the update the app
+          # offers 404s.
+          if f"/v{name}/" not in manifest["apkUrl"]:
+              print(f"::error::apkUrl does not point at v{name}: {manifest['apkUrl']}")
+              sys.exit(1)
+
+          sha = manifest["sha256"]
+          if not re.fullmatch(r"[0-9a-f]{64}", sha or ""):
+              print(f"::error::sha256 is not a lowercase hex digest: {sha!r}")
+              sys.exit(1)
+
+          print(f"manifest OK: {name} ({manifest['versionCode']}) {sha[:12]}…")
+          PY
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: readon-debug
+          path: app-project/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,86 @@
+name: Bug report
+description: Something in Readon does not work as expected
+title: '[Bug] '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        If the problem is that a book will not open or download, please include
+        the result of **设置 → 网络线路 → 检测线路** if you can. Most "cannot
+        open" reports are a blocked route rather than a broken app, and that list
+        says which routes work on your network.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what happened instead?
+      placeholder: |
+        I tapped a book on 主页 and expected it to open. Instead I got
+        "打不开这本书" with a connection error.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open 主页
+        2. Tap any book
+        3. See the error
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Readon version
+      description: Shown in 设置 → 关于
+      placeholder: '1.0.1 (10001)'
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device and Android version
+      placeholder: 'Xiaomi 13, Android 14'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: network
+    attributes:
+      label: Network
+      description: GitHub access differs a lot between these.
+      options:
+        - Wi-Fi, mainland China
+        - Mobile data, mainland China
+        - Wi-Fi, outside mainland China
+        - Mobile data, outside mainland China
+        - VPN / proxy
+    validations:
+      required: true
+
+  - type: textarea
+    id: routes
+    attributes:
+      label: Route check result
+      description: |
+        From 设置 → 网络线路 → 检测线路. Paste which routes show as available.
+        Leave blank if you cannot reach that screen.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Anything else
+      description: Screenshots, the exact error text, or other context.
+    validations:
+      required: false

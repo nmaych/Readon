@@ -1,0 +1,240 @@
+package com.readon.reader.data
+
+import android.content.Context
+import com.google.gson.Gson
+import com.google.gson.GsonBuilder
+import com.google.gson.reflect.TypeToken
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+
+/**
+ * The downloaded library.
+ *
+ * Kept as a single JSON index beside the book files rather than in a database:
+ * the whole record set is a few hundred entries at most, it is always read and
+ * written whole, and a JSON file can be inspected and repaired by hand when a
+ * user reports that a book "disappeared".
+ *
+ * Every mutation rewrites the index through [write], so a crash mid-write can
+ * only ever lose the newest change, never the file -- see the temp-file rename.
+ */
+class BookStore(private val context: Context) {
+
+    private val gson: Gson = GsonBuilder().setPrettyPrinting().create()
+    private val indexFile: File get() = File(context.filesDir, "library.json")
+    val booksDir: File get() = File(context.filesDir, "books")
+
+    private val type = object : TypeToken<MutableList<Book>>() {}.type
+
+    /** All downloaded books, newest addition first among equals. */
+    suspend fun load(): List<Book> = withContext(Dispatchers.IO) {
+        readIndex()
+    }
+
+    private fun readIndex(): MutableList<Book> {
+        if (!indexFile.exists()) return mutableListOf()
+        return try {
+            val json = indexFile.readText()
+            if (json.isBlank()) mutableListOf()
+            else gson.fromJson<MutableList<Book>>(json, type) ?: mutableListOf()
+        } catch (_: Exception) {
+            // A corrupt index must not brick the shelf. The book files are still
+            // on disk; the user can re-download, and doing that overwrites the
+            // index with a good one.
+            mutableListOf()
+        }
+    }
+
+    private fun write(books: List<Book>) {
+        indexFile.parentFile?.mkdirs()
+        val tmp = File(indexFile.parentFile, "library.json.tmp")
+        tmp.writeText(gson.toJson(books, type))
+        if (indexFile.exists()) indexFile.delete()
+        tmp.renameTo(indexFile)
+    }
+
+    /**
+     * Where a book's file belongs on disk.
+     *
+     * Mirrors the repository's folder structure. The name is derived from the path
+     * so a re-download overwrites rather than accumulating duplicates, and the id
+     * is stable so reading progress carries over.
+     */
+    fun targetFileFor(book: Book): File {
+        val source = book.source
+        val dir = File(booksDir, "${source.owner}_${source.repo}/${book.folder}")
+        dir.mkdirs()
+        return File(dir, sanitize(book.title) + "." + book.format)
+    }
+
+    /**
+     * Record a book whose bytes are already on disk.
+     *
+     * Separate from [save] because downloads stream straight to the destination
+     * file: this library's books reach 75 MB, and buffering one in memory to hand
+     * it to a write is how a reader runs out of heap on a mid-range phone.
+     *
+     * @param sizeBytes the file's size, already written.
+     */
+    suspend fun register(book: Book, file: File, sizeBytes: Long): Book =
+        withContext(Dispatchers.IO) {
+            val record = book.copy(
+                localFile = file.absolutePath,
+                downloadedAt = System.currentTimeMillis(),
+                size = sizeBytes,
+            )
+            val current = readIndex()
+            val idx = current.indexOfFirst { it.id == record.id }
+            if (idx >= 0) {
+                // Preserve reading position across a re-download.
+                val old = current[idx]
+                current[idx] = record.copy(
+                    progress = old.progress,
+                    charOffset = old.charOffset,
+                    chapterIndex = old.chapterIndex,
+                    lastReadAt = old.lastReadAt,
+                )
+            } else {
+                current.add(record)
+            }
+            write(current)
+            current.first { it.id == record.id }
+        }
+
+    /**
+     * Move a downloaded file into place and record it.
+     *
+     * @param bytes the file's content, already fetched.
+     * @return the stored record.
+     */
+    suspend fun save(book: Book, bytes: ByteArray): Book = withContext(Dispatchers.IO) {
+        val target = targetFileFor(book)
+        target.writeBytes(bytes)
+        register(book, target, bytes.size.toLong())
+    }
+
+    /**
+     * Import a book the user picked from device storage.
+     *
+     * The picked file is copied into the app's own directory rather than
+     * referenced by its content URI. A content URI is a grant that can be revoked
+     * -- when the app is reinstalled, or the provider is cleared -- and a book
+     * that opens today and is unreadable tomorrow is worse than one that takes a
+     * moment to copy.
+     *
+     * The id is derived from the file's own name so re-importing the same file
+     * updates the existing record instead of creating a duplicate.
+     */
+    suspend fun importLocal(
+        displayName: String,
+        bytes: ByteArray,
+        format: BookFormat,
+    ): Book = withContext(Dispatchers.IO) {
+        val title = displayName.substringBeforeLast('.').ifBlank { displayName }
+        val id = "local/$displayName"
+
+        val dir = File(booksDir, "本地导入")
+        dir.mkdirs()
+        val target = File(dir, "${sanitize(title)}.${format.ext}")
+        target.writeBytes(bytes)
+
+        val record = Book(
+            id = id,
+            title = title,
+            author = null,
+            folder = "本地导入",
+            path = displayName,
+            format = format.ext,
+            size = bytes.size.toLong(),
+            owner = LOCAL_OWNER,
+            repo = LOCAL_REPO,
+            branch = LOCAL_BRANCH,
+            localFile = target.absolutePath,
+            downloadedAt = System.currentTimeMillis(),
+        )
+
+        val current = readIndex()
+        val idx = current.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            // Keep the reading position across a re-import of the same title.
+            val old = current[idx]
+            current[idx] = record.copy(
+                progress = old.progress,
+                charOffset = old.charOffset,
+                chapterIndex = old.chapterIndex,
+                lastReadAt = old.lastReadAt,
+            )
+        } else {
+            current.add(record)
+        }
+        write(current)
+        current.first { it.id == id }
+    }
+
+    /** Record reading progress without touching the file. */
+    suspend fun updateProgress(
+        id: String,
+        progress: Float,
+        charOffset: Int,
+        chapterIndex: Int,
+    ): Unit = withContext(Dispatchers.IO) {
+        val current = readIndex()
+        val idx = current.indexOfFirst { it.id == id }
+        if (idx < 0) return@withContext
+        current[idx] = current[idx].copy(
+            progress = progress.coerceIn(0f, 1f),
+            charOffset = charOffset.coerceAtLeast(0),
+            chapterIndex = chapterIndex,
+            lastReadAt = System.currentTimeMillis(),
+        )
+        write(current)
+    }
+
+    suspend fun delete(id: String): Unit = withContext(Dispatchers.IO) {
+        val current = readIndex()
+        val idx = current.indexOfFirst { it.id == id }
+        if (idx < 0) return@withContext
+        val book = current[idx]
+        book.localFile?.let { runCatching { File(it).delete() } }
+        current.removeAt(idx)
+        write(current)
+    }
+
+    /** Total bytes occupied by downloaded books. */
+    suspend fun usedBytes(): Long = withContext(Dispatchers.IO) {
+        readIndex().sumOf { book ->
+            book.localFile?.let { runCatching { File(it).length() }.getOrDefault(0L) } ?: 0L
+        }
+    }
+
+    suspend fun clearAll(): Unit = withContext(Dispatchers.IO) {
+        readIndex().forEach { b -> b.localFile?.let { runCatching { File(it).delete() } } }
+        booksDir.deleteRecursively()
+        write(emptyList())
+    }
+
+    /** Does this remote book already have a local copy? */
+    suspend fun find(id: String): Book? = withContext(Dispatchers.IO) {
+        readIndex().firstOrNull { it.id == id }
+    }
+
+    private fun sanitize(name: String): String {
+        val cleaned = name.map { c ->
+            if (c in ILLEGAL || c.code < 0x20) '_' else c
+        }.joinToString("").trim().trimEnd('.')
+        // Windows and some Android filesystems dislike reserved device names,
+        // and an empty stem would produce a file named ".txt".
+        val safe = cleaned.ifBlank { "book" }
+        return if (safe.length > 100) safe.take(100) else safe
+    }
+
+    private companion object {
+        val ILLEGAL = charArrayOf('/', '\\', ':', '*', '?', '"', '<', '>', '|')
+
+        /** Marks a record as locally imported rather than fetched from a repo. */
+        const val LOCAL_OWNER = "local"
+        const val LOCAL_REPO = "imported"
+        const val LOCAL_BRANCH = "-"
+    }
+}

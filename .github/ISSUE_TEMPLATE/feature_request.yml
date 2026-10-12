@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest an idea or an improvement for Readon
+title: '[Feature] '
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Readon is deliberately small. Descriptions of the problem you are hitting
+        are more useful than descriptions of a solution -- the best fix is
+        sometimes not the one that was asked for.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you hitting?
+      placeholder: |
+        My library has books in folders two levels deep and the home screen
+        flattens them into one long list, so I cannot find anything.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have tried
+      description: Including other apps, if this is something they do well.
+    validations:
+      required: false

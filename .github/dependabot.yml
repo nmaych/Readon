@@ -1,0 +1,34 @@
+version: 2
+
+updates:
+  # The Gradle dependency set is pinned to what the offline cache holds, so
+  # bumps here are deliberate rather than automatic. Kept weekly and grouped so
+  # a version bump arrives as one reviewable PR instead of six.
+  - package-ecosystem: gradle
+    directory: /app-project
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      androidx:
+        patterns:
+          - 'androidx.*'
+      compose:
+        patterns:
+          - 'androidx.compose.*'
+    labels:
+      - dependencies
+    commit-message:
+      prefix: 'chore(deps)'
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: 'chore(ci)'

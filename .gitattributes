@@ -1,0 +1,30 @@
+# Normalise line endings so a Windows checkout and a Linux CI runner agree.
+# Without this, every .kt file shows as fully modified on one side or the other,
+# and shell scripts committed from Windows arrive with CRLF and fail to run.
+* text=auto eol=lf
+
+# Gradle wrapper scripts must keep LF: a CRLF shebang breaks `./gradlew` on the
+# Linux runners.
+gradlew text eol=lf
+*.sh text eol=lf
+
+# Windows-only build entry point.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary -- never line-ending converted, never diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ttf binary
+*.otf binary
+*.jar binary
+*.jks binary
+*.keystore binary
+*.apk binary
+*.aab binary
+*.zip binary
+
+# Generated and not worth diff noise.
+dist/update.json -diff

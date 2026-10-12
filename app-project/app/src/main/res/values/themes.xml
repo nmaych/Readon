@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The app is entirely Compose, so these XML themes only need to give the
+      window a sane background colour and stay out of the way. Matching the
+      Compose surfaces here is what stops a white flash on cold start in dark
+      mode.
+    -->
+    <style name="Theme.Readon" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FFF7F9FC</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>
