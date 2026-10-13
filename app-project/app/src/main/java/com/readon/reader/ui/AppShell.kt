@@ -85,6 +85,12 @@ fun AppShell(app: ReadonApp) {
     // reader survives tab changes and configuration changes.
     var openBook by remember { androidx.compose.runtime.mutableStateOf<com.readon.reader.data.Book?>(null) }
 
+    // Bumped whenever the reader closes. Reading a book writes progress to the
+    // store, and the shelf is still in the composition behind the reader, so
+    // without this signal the cover would show a stale percentage until the app
+    // was restarted.
+    var dataRevision by remember { mutableIntStateOf(0) }
+
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -94,8 +100,6 @@ fun AppShell(app: ReadonApp) {
             snackbar.showSnackbar(msg)
         }
     }
-
-    val themeRevision by app.prefs.revision.collectAsStateSafe()
 
     Box(Modifier.fillMaxSize()) {
         Scaffold(
@@ -126,6 +130,7 @@ fun AppShell(app: ReadonApp) {
                         toast = toast,
                         onOpen = { openBook = it },
                         onBrowse = { tab = 0 },
+                        dataRevision = dataRevision,
                     )
                     else -> SettingsScreen(
                         app = app,
@@ -141,8 +146,10 @@ fun AppShell(app: ReadonApp) {
             ReaderScreen(
                 app = app,
                 book = book,
-                onClose = { openBook = null },
-                toast = toast,
+                onClose = {
+                    openBook = null
+                    dataRevision++
+                },
             )
         }
     }

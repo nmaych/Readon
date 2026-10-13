@@ -171,13 +171,20 @@ def main() -> int:
         return 0
 
     MANIFEST.parent.mkdir(parents=True, exist_ok=True)
-    MANIFEST.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    # `newline="\n"` is not optional. `write_text` opens in text mode, so on
+    # Windows every "\n" would become "\r\n" -- and `tools/check_repo_config.py`
+    # rejects CRLF in this file, as does `stamp_manifest.py`, which sets the same
+    # flag. Without it, running a release locally produces a manifest that fails
+    # the repository's own check.
+    with open(MANIFEST, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
 
-    # Re-read to prove what was written parses.
-    json.loads(MANIFEST.read_text(encoding="utf-8"))
+    # Re-read to prove what was written parses, and that it landed as LF.
+    raw = MANIFEST.read_bytes()
+    json.loads(raw.decode("utf-8"))
+    if b"\r\n" in raw:
+        print("::error::wrote CRLF into dist/update.json", file=sys.stderr)
+        return 1
     print(f"manifest -> {MANIFEST.relative_to(ROOT)}")
     return 0
 

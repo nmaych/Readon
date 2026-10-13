@@ -62,6 +62,16 @@ data class LibraryListing(
  *     blocked here even though `raw.githubusercontent.com` is -- they are
  *     different services -- and jsDelivr's listing API cannot describe this
  *     repository at all. So the two use independent route lists.
+ *
+ * ## Why every request is cancellable and time-bounded
+ *
+ * Route selection is a race: one request per candidate, first success wins. That
+ * only works if the losers actually *stop*. They did not -- the requests were
+ * blocking `execute()` calls that kept their sockets until their own timeouts
+ * expired, so opening a book could leave a dozen dead connections draining for a
+ * minute while the reader displayed "正在排版…". Every call now goes through
+ * [Http.execute], which cancels the underlying OkHttp call the moment its
+ * coroutine is cancelled, and carries a whole-call timeout.
  */
 class GithubClient(private val prefs: Prefs) {
 
@@ -97,43 +107,70 @@ class GithubClient(private val prefs: Prefs) {
     }
 
     /**
-     * Pick a host that can actually deliver [path], using a 2 KB range request.
+     * Pick a host that can actually deliver [path].
      *
-     * Every candidate is probed at once because each probe is tiny, and the first
-     * to answer wins. This is the step that turns "one of nine hosts might work"
-     * into a single known-good host before any real bytes move.
+     * When a winner from an earlier request is remembered, it is probed *alone*
+     * first and the rest are only woken if it fails. That fast path is what keeps
+     * opening a book to a single 2 KB request on a working network; racing all
+     * nine hosts every time is nine requests' worth of latency, bandwidth and
+     * battery for the same answer.
+     *
+     * @param onStage called with a short user-facing note as selection proceeds.
      */
-    private suspend fun pickMirror(source: LibrarySource, path: String): Mirror? =
-        withContext(Dispatchers.IO) {
-            val candidates = mirrorOrder()
-            val results = Channel<Pair<Boolean, Mirror>>(Channel.UNLIMITED)
+    private suspend fun pickMirror(
+        source: LibrarySource,
+        path: String,
+        onStage: (String) -> Unit = {},
+    ): Mirror? = withContext(Dispatchers.IO) {
+        val candidates = mirrorOrder()
+        val remembered = Mirror.byId(prefs.preferredMirror)
 
-            coroutineScope {
-                val jobs = candidates.map { mirror ->
-                    launch {
-                        val url = mirror.rawUrl(source, path, prefs.mirrorPrefix)
-                        val ok = runCatching { probeRange(url) }.getOrDefault(false)
-                        results.send(ok to mirror)
-                    }
-                }
-
-                var winner: Mirror? = null
-                for (i in candidates.indices) {
-                    val (ok, mirror) = results.receive()
-                    if (ok) {
-                        winner = mirror
-                        break
-                    }
-                }
-                jobs.forEach { it.cancel() }
-                results.close()
-                winner
-            }
+        if (remembered != null && remembered in candidates) {
+            val ok = runCatching {
+                probeRange(remembered.rawUrl(source, path, prefs.mirrorPrefix), FAST_PROBE_MS)
+            }.getOrDefault(false)
+            if (ok) return@withContext remembered
+            onStage("首选线路无响应，正在切换…")
         }
 
+        // The remembered host has just failed its short probe, so racing it again
+        // would only add a request that cannot win. Everything else is tried.
+        val racers = if (remembered != null) candidates.filter { it != remembered } else candidates
+        if (racers.isEmpty()) return@withContext remembered
+
+        val results = Channel<Pair<Boolean, Mirror>>(Channel.UNLIMITED)
+
+        coroutineScope {
+            val jobs = racers.map { mirror ->
+                launch {
+                    val url = mirror.rawUrl(source, path, prefs.mirrorPrefix)
+                    val ok = runCatching { probeRange(url) }.getOrDefault(false)
+                    results.send(ok to mirror)
+                }
+            }
+
+            var winner: Mirror? = null
+            for (i in racers.indices) {
+                val (ok, mirror) = results.receive()
+                if (ok) {
+                    winner = mirror
+                    break
+                }
+            }
+            // Cancelling here now genuinely aborts the in-flight probes: each is
+            // an enqueued OkHttp call whose cancellation closes its socket.
+            jobs.forEach { it.cancel() }
+            results.close()
+            // Falling back to the remembered host is better than returning null:
+            // its fast probe may have lost a race with a momentarily busy network,
+            // and the real transfer retries the whole list anyway.
+            winner ?: remembered
+        }
+    }
+
     /** True when a 2 KB range of [url] comes back as plausible file content. */
-    private fun probeRange(url: String): Boolean {
-        Http.client.newCall(request(url, rangeProbe = true)).execute().use { resp ->
+    private suspend fun probeRange(url: String, timeoutMs: Long = PROBE_MS): Boolean {
+        Http.execute(request(url, rangeProbe = true), timeoutMs).use { resp ->
             if (!resp.isSuccessful) return false
             val body = resp.body ?: return false
             // Several of these proxies answer an unknown path with an HTML error
@@ -155,12 +192,13 @@ class GithubClient(private val prefs: Prefs) {
      * Used for the real transfer after [pickMirror] has named a host: if that host
      * drops mid-transfer, the next is tried rather than failing the whole
      * operation. The remembered winner is updated on success.
+     *
+     * The URL is built by [block] rather than passed in, because each attempt
+     * needs its *own* host's URL -- that is the whole point of retrying.
      */
     private suspend fun <T> withMirrors(
-        source: LibrarySource,
-        path: String,
         preferred: Mirror?,
-        block: (Mirror) -> T,
+        block: suspend (Mirror) -> T,
     ): T = withContext(Dispatchers.IO) {
         val order = buildList {
             preferred?.let { add(it) }
@@ -205,8 +243,8 @@ class GithubClient(private val prefs: Prefs) {
         return ordered(ListSource.byId(prefs.preferredListSource), ListSource.RACE_ORDER)
     }
 
-    private fun fetchListing(src: ListSource, source: LibrarySource): LibraryListing {
-        val body = get(src.url(source))
+    private suspend fun fetchListing(src: ListSource, source: LibrarySource): LibraryListing {
+        val body = get(src.url(source), LIST_TIMEOUT_MS)
         return when (src) {
             ListSource.JsDelivrData -> parseJsDelivr(body, source)
             else -> parseGithubTree(body, source)
@@ -294,21 +332,38 @@ class GithubClient(private val prefs: Prefs) {
      * buffering one of those to hand it to a file write is how a reader gets an
      * out-of-memory crash on a mid-range phone.
      *
+     * @param expectedSize the size the repository reported, used for progress when
+     *   the route does not send a `Content-Length` (the proxies frequently do not).
+     * @param onProgress called with 0f..1f. It is only called when a total is
+     *   known, so the UI never shows a progress bar that cannot move.
      * @return the number of bytes written.
      */
     suspend fun downloadTo(
         source: LibrarySource,
         path: String,
         target: File,
+        expectedSize: Long = 0L,
         onProgress: (Float) -> Unit = {},
+        onStage: (String) -> Unit = {},
     ): Long = withContext(Dispatchers.IO) {
-        val preferred = pickMirror(source, path)
-        withMirrors(source, path, preferred) { mirror ->
-            streamToFile(mirror.rawUrl(source, path, prefs.mirrorPrefix), target, onProgress)
+        val preferred = pickMirror(source, path, onStage)
+        withMirrors(preferred) { mirror ->
+            onStage("正在下载…")
+            streamToFile(
+                mirror.rawUrl(source, path, prefs.mirrorPrefix),
+                target,
+                expectedSize,
+                onProgress,
+            )
         }
     }
 
-    private fun streamToFile(url: String, target: File, onProgress: (Float) -> Unit): Long {
+    private suspend fun streamToFile(
+        url: String,
+        target: File,
+        expectedSize: Long,
+        onProgress: (Float) -> Unit,
+    ): Long {
         // Write to a sibling temp file and rename on success, so an interrupted
         // transfer can never be mistaken for a complete book.
         val tmp = File(target.parentFile, target.name + ".part")
@@ -316,10 +371,13 @@ class GithubClient(private val prefs: Prefs) {
         tmp.delete()
 
         try {
-            Http.client.newCall(request(url)).execute().use { resp ->
+            Http.execute(request(url), TRANSFER_TIMEOUT_MS).use { resp ->
                 if (!resp.isSuccessful) throw LibraryException(httpMessage(resp.code))
                 val body = resp.body ?: throw LibraryException("下载失败：内容为空")
-                val total = body.contentLength()
+                // A proxy that re-encodes the stream reports -1 here; the size from
+                // the repository listing is the reliable one.
+                val declared = body.contentLength()
+                val total = if (declared > 0) declared else expectedSize
                 var read = 0L
                 body.byteStream().use { input ->
                     tmp.outputStream().use { out ->
@@ -329,11 +387,18 @@ class GithubClient(private val prefs: Prefs) {
                             if (n < 0) break
                             out.write(buf, 0, n)
                             read += n
-                            if (total > 0) onProgress(read.toFloat() / total)
+                            if (total > 0) onProgress((read.toFloat() / total).coerceIn(0f, 1f))
                         }
                     }
                 }
                 if (read == 0L) throw LibraryException("下载失败：内容为空")
+                // A truncated transfer that still closed cleanly is the one
+                // failure mode the user cannot see: it produces a book that opens
+                // and then ends mid-sentence. When the repository told us the size,
+                // insist on it.
+                if (declared <= 0 && expectedSize > 0 && read != expectedSize) {
+                    throw LibraryException("下载不完整（$read / $expectedSize 字节），请重试")
+                }
             }
             if (target.exists()) target.delete()
             if (!tmp.renameTo(target)) {
@@ -348,23 +413,26 @@ class GithubClient(private val prefs: Prefs) {
     }
 
     /**
-     * Fetch a file into memory, for reading.
+     * Fetch a whole file into memory.
      *
-     * The cap is generous because this library needs it -- 33 of its 53 books are
-     * over 8 MB -- but it is still a cap: an unbounded read of a 75 MB file into a
-     * String is a crash waiting for a low-memory device. Books past it are still
-     * readable after downloading, which streams to disk instead.
+     * Used only for formats that genuinely need random access to the bytes -- EPUB
+     * is a zip. Text formats stream to a file and are decoded from it, so a 75 MB
+     * novel never has to exist as a byte array.
      */
-    suspend fun fetchText(source: LibrarySource, path: String): ByteArray =
-        withContext(Dispatchers.IO) {
-            val preferred = pickMirror(source, path)
-            withMirrors(source, path, preferred) { mirror ->
-                download(mirror.rawUrl(source, path, prefs.mirrorPrefix), MAX_TEXT_BYTES)
-            }
+    suspend fun fetchBytes(
+        source: LibrarySource,
+        path: String,
+        limit: Long,
+        onStage: (String) -> Unit = {},
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val preferred = pickMirror(source, path, onStage)
+        withMirrors(preferred) { mirror ->
+            download(mirror.rawUrl(source, path, prefs.mirrorPrefix), limit)
         }
+    }
 
-    private fun download(url: String, limit: Long): ByteArray {
-        Http.client.newCall(request(url)).execute().use { resp ->
+    private suspend fun download(url: String, limit: Long): ByteArray {
+        Http.execute(request(url), TRANSFER_TIMEOUT_MS).use { resp ->
             if (!resp.isSuccessful) throw LibraryException(httpMessage(resp.code))
             val body = resp.body ?: throw LibraryException("下载失败：内容为空")
             val declared = body.contentLength()
@@ -387,32 +455,50 @@ class GithubClient(private val prefs: Prefs) {
      *
      * `dist/update.json` lives on `raw.githubusercontent.com` and is therefore
      * just as blocked as the books are, so it needs the same treatment.
+     *
+     * @param timeoutMs a whole-call ceiling. The update check passes a short one:
+     *   "no answer" and "no update" are the same outcome to the user, and waiting
+     *   a minute to learn it is worse than saying so quickly.
      */
-    suspend fun fetchRaw(url: String): String = withContext(Dispatchers.IO) {
-        val candidates = buildList {
-            add(url)
-            if (url.startsWith("https://raw.githubusercontent.com/")) {
-                add("https://ghproxy.net/$url")
-                add("https://gh-proxy.com/$url")
-                add("https://ghfast.top/$url")
+    suspend fun fetchRaw(url: String, timeoutMs: Long = RAW_TIMEOUT_MS): String =
+        withContext(Dispatchers.IO) {
+            val candidates = buildList {
+                add(url)
+                if (url.startsWith("https://raw.githubusercontent.com/")) {
+                    add("https://ghproxy.net/$url")
+                    add("https://gh-proxy.com/$url")
+                    add("https://ghfast.top/$url")
+                }
             }
+            val (body, _) = race(candidates, ::hostOf) { get(it, timeoutMs) }
+            body
         }
-        val (body, _) = race(candidates, ::hostOf) { get(it) }
-        body
-    }
 
     /**
      * Probe every file route and report which ones answer.
      *
      * Backs the "检测线路" button. On a blocked network the user cannot tell a
      * broken app from a blocked host; this is what makes the difference visible.
+     *
+     * The probes run concurrently: sequentially, a blocked network makes this
+     * take nine timeouts, which reads as a hang rather than a diagnostic.
      */
     suspend fun probeRoutes(source: LibrarySource, path: String): List<Pair<String, Boolean>> =
         withContext(Dispatchers.IO) {
-            Mirror.RACE_ORDER.map { mirror ->
-                val url = mirror.rawUrl(source, path, prefs.mirrorPrefix)
-                val ok = runCatching { probeRange(url) }.getOrDefault(false)
-                mirror.label to ok
+            val results = Channel<Pair<String, Boolean>>(Channel.UNLIMITED)
+            coroutineScope {
+                Mirror.RACE_ORDER.forEach { mirror ->
+                    launch {
+                        val url = mirror.rawUrl(source, path, prefs.mirrorPrefix)
+                        val ok = runCatching { probeRange(url) }.getOrDefault(false)
+                        results.send(mirror.label to ok)
+                    }
+                }
+                val out = ArrayList<Pair<String, Boolean>>(Mirror.RACE_ORDER.size)
+                repeat(Mirror.RACE_ORDER.size) { out.add(results.receive()) }
+                results.close()
+                // Report in the declared order rather than in completion order.
+                Mirror.RACE_ORDER.map { m -> out.first { it.first == m.label } }
             }
         }
 
@@ -423,10 +509,10 @@ class GithubClient(private val prefs: Prefs) {
     /**
      * Try every candidate at once and return the first success.
      *
-     * For the listing only: those payloads are ~13 KB, so racing all of them costs
-     * less than a single page of a book. File transfers go through [pickMirror]
-     * and [withMirrors] instead, because racing whole files would multiply
-     * bandwidth by the number of hosts.
+     * For the listing and small documents only: those payloads are ~13 KB, so
+     * racing all of them costs less than a single page of a book. File transfers
+     * go through [pickMirror] and [withMirrors] instead, because racing whole
+     * files would multiply bandwidth by the number of hosts.
      */
     private suspend fun <T, C> race(
         candidates: List<C>,
@@ -467,8 +553,8 @@ class GithubClient(private val prefs: Prefs) {
         return listOf(preferred) + all.filter { it != preferred }
     }
 
-    private fun get(url: String): String {
-        Http.client.newCall(request(url)).execute().use { resp ->
+    private suspend fun get(url: String, timeoutMs: Long? = null): String {
+        Http.execute(request(url), timeoutMs).use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 val msg = runCatching {
@@ -502,14 +588,23 @@ class GithubClient(private val prefs: Prefs) {
         runCatching { java.net.URI(url).host }.getOrNull() ?: url
 
     companion object {
-        /**
-         * Online-reading cap.
-         *
-         * 64 MB because this library needs it -- books here reach 75 MB, and a
-         * lower cap would make "在线阅读" fail for most of the shelf. Books past it
-         * remain readable after downloading, which streams to disk.
-         */
+        /** Online-reading cap, for the formats that must be buffered whole. */
         const val MAX_TEXT_BYTES = 64L * 1024 * 1024
+
+        /** A probe that has not answered in this long is not going to. */
+        private const val PROBE_MS = 15_000L
+
+        /** The remembered route gets a shorter leash before the race starts. */
+        private const val FAST_PROBE_MS = 8_000L
+
+        /** Listing payloads are ~13 KB; they should arrive quickly or not at all. */
+        private const val LIST_TIMEOUT_MS = 25_000L
+
+        /** A whole book transfer. Generous, but still a ceiling. */
+        private const val TRANSFER_TIMEOUT_MS = 10 * 60 * 1000L
+
+        /** Small documents (update manifest, release JSON). */
+        private const val RAW_TIMEOUT_MS = 20_000L
     }
 }
 

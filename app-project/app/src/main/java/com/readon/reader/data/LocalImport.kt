@@ -5,13 +5,23 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * Importing books the user already has on the device.
  *
  * The file is read through the content resolver and copied into app storage by
- * [BookStore.importLocal]; the URI grant is only needed for the moment of the
+ * [BookStore.importLocalFile]; the URI grant is only needed for the moment of the
  * copy, so nothing is persisted and nothing breaks if the grant is later revoked.
+ *
+ * ## Why the copy streams
+ *
+ * This used to read the picked document into a `ByteArray` and hand it to the
+ * store. Importing a large `txt` therefore allocated the whole file in memory,
+ * then allocated it *again* when the bytes were written to disk -- which is why
+ * importing a big book crashed instead of failing with a message. The bytes now
+ * go straight from the provider's stream to the destination file, so importing a
+ * 64 MB book costs a 64 KB buffer.
  */
 object LocalImport {
 
@@ -59,13 +69,26 @@ object LocalImport {
                 )
             }
 
-            val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
-                input.readAtMost(MAX_IMPORT_BYTES)
-            } ?: throw ImportException("无法读取这个文件")
+            // Stream into a scratch file first. If the copy fails halfway -- a
+            // revoked grant, a provider that dies mid-read -- the shelf is left
+            // untouched rather than holding a record for a truncated book.
+            val scratch = File(context.cacheDir, "import-scratch").apply { mkdirs() }
+            val temp = File.createTempFile("import-", ".${format.ext}", scratch)
+            try {
+                val copied = context.contentResolver.openInputStream(uri)?.use { input ->
+                    temp.outputStream().use { out ->
+                        input.copyToAtMost(out, MAX_IMPORT_BYTES)
+                    }
+                } ?: throw ImportException("无法读取这个文件")
 
-            if (bytes.isEmpty()) throw ImportException("文件是空的")
+                if (copied == 0L) throw ImportException("文件是空的")
 
-            store.importLocal(name, bytes, format)
+                store.importLocalFile(name, temp, format, copied)
+            } finally {
+                // importLocalFile moves the file into place on success; on any
+                // failure the scratch copy is removed here.
+                runCatching { if (temp.exists()) temp.delete() }
+            }
         }
 
     /**
@@ -83,17 +106,29 @@ object LocalImport {
     }.getOrNull()
 }
 
-/** Read at most [limit] bytes from a stream. */
-private fun java.io.InputStream.readAtMost(limit: Long): ByteArray {
-    val out = java.io.ByteArrayOutputStream()
+/**
+ * Copy at most [limit] bytes from this stream to [out].
+ *
+ * @return the number of bytes copied.
+ * @throws LocalImport.ImportException when the source is larger than [limit].
+ */
+private fun java.io.InputStream.copyToAtMost(
+    out: java.io.OutputStream,
+    limit: Long,
+): Long {
     val buf = ByteArray(64 * 1024)
     var total = 0L
     while (true) {
         val n = read(buf)
         if (n < 0) break
         total += n
-        if (total > limit) throw LocalImport.ImportException("文件太大，无法导入")
+        if (total > limit) {
+            throw LocalImport.ImportException(
+                "文件超过 ${limit / 1024 / 1024} MB，无法导入"
+            )
+        }
         out.write(buf, 0, n)
     }
-    return out.toByteArray()
+    out.flush()
+    return total
 }

@@ -8,17 +8,6 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Density
 
 /**
- * One rendered page.
- *
- * [start] is the index into the book's text of the first character on the page,
- * and [end] the first character *after* it. Storing offsets rather than page
- * numbers is what keeps a reading position meaningful when the user changes the
- * font size: the position is anchored to the text, so repagination lands on the
- * same sentence instead of jumping to an unrelated page 12.
- */
-data class PageSlice(val start: Int, val end: Int)
-
-/**
  * Splits a book into pages that fit a given viewport.
  *
  * Layout is measured with the same [TextMeasurer] Compose uses to draw, so a
@@ -152,9 +141,13 @@ class TextPaginator(
  * costs one measure pass per new page and nothing after that, which is what
  * makes a 3000-page novel scroll as smoothly as a short one.
  *
+ * The page bookkeeping itself lives in [PageCursor], which is free of Android
+ * types so it can be verified on the desktop. This class only connects it to a
+ * [TextMeasurer]: the measurement is what is expensive, and the cursor is what
+ * decides where pages begin and end.
+ *
  * Not thread safe by construction; it is only ever touched from the composition
- * that owns it. [TextPaginator] and [TextMeasurer] are safe to reuse, which is
- * what allows the background prefetch in [ReaderState] to share them.
+ * that owns it. [TextPaginator] and [TextMeasurer] are safe to reuse.
  */
 class Paginator(
     private val text: CharSequence,
@@ -163,55 +156,20 @@ class Paginator(
     private val width: Int,
     private val height: Int,
 ) {
-    private val pages = ArrayList<PageSlice>()
-    private var complete = false
-
-    val pageCount: Int get() = pages.size
-    val isComplete: Boolean get() = complete
-
-    init {
-        if (text.isEmpty()) {
-            pages.add(PageSlice(0, 0))
-            complete = true
-        } else {
-            ensurePage(0)
-        }
+    private val cursor = PageCursor(text.length) { start ->
+        paginator.pageEnd(text, start, width, height, style)
     }
+
+    val pageCount: Int get() = cursor.pageCount
+    val isComplete: Boolean get() = cursor.isComplete
 
     /** Make sure page [index] exists, computing forward as needed. */
-    fun ensurePage(index: Int) {
-        if (complete || index < 0) return
-        var guard = 0
-        while (pages.size <= index && !complete) {
-            val last = pages.last()
-            if (last.end >= text.length) {
-                complete = true
-                break
-            }
-            val end = paginator.pageEnd(text, last.end, width, height, style)
-            pages.add(PageSlice(last.end, end))
-            if (++guard > HARD_LIMIT) {
-                // A pathological input (no break opportunity, absurdly small
-                // viewport) must not spin forever.
-                complete = true
-            }
-        }
-    }
+    fun ensurePage(index: Int) = cursor.ensurePage(index)
 
     /** Run pagination to the end. Used only when the user asks for the count. */
-    fun completeAll() {
-        var guard = 0
-        while (!complete && guard < HARD_LIMIT) {
-            ensurePage(pages.size)
-            guard++
-        }
-    }
+    fun completeAll() = cursor.completeAll()
 
-    fun page(index: Int): PageSlice {
-        if (index < 0) return PageSlice(0, 0)
-        ensurePage(index)
-        return pages.getOrElse(index) { pages.last() }
-    }
+    fun page(index: Int): PageSlice = cursor.page(index)
 
     fun textOf(index: Int): String {
         val p = page(index)
@@ -220,23 +178,5 @@ class Paginator(
     }
 
     /** Keep a page's top visible; used to reflow after a viewport change. */
-    fun pageOf(offset: Int): Int {
-        if (pages.isEmpty()) return 0
-        for (i in pages.indices) {
-            if (offset < pages[i].end) return i
-        }
-        // The offset is past everything computed so far: compute forward to it.
-        var guard = 0
-        while (!complete && guard < HARD_LIMIT) {
-            val last = pages.last()
-            if (offset < last.end) return pages.size - 1
-            ensurePage(pages.size)
-            guard++
-        }
-        return (pages.size - 1).coerceAtLeast(0)
-    }
-
-    private companion object {
-        const val HARD_LIMIT = 50_000
-    }
+    fun pageOf(offset: Int): Int = cursor.pageOf(offset)
 }

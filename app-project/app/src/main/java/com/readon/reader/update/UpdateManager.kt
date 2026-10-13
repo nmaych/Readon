@@ -89,9 +89,17 @@ class UpdateManager(
         fromReleases
     }
 
+    /**
+     * Fetch the manifest.
+     *
+     * The timeout is passed down to every route attempt. Without it the check
+     * could sit for the sum of four hosts' connect timeouts before giving up,
+     * which is why "检查更新" appeared to hang on "连接 GitHub 中": the request
+     * had not failed yet, so nothing was reported.
+     */
     private suspend fun checkManifest(url: String): UpdateResult {
         return try {
-            val body = client.fetchRaw(url)
+            val body = client.fetchRaw(url, CHECK_TIMEOUT_MS)
             val obj = JsonParser.parseString(body).asJsonObject
             val code = obj.get("versionCode")?.asInt
                 ?: return UpdateResult.Failed("清单缺少 versionCode")
@@ -111,15 +119,18 @@ class UpdateManager(
             } else {
                 UpdateResult.UpToDate(name)
             }
-        } catch (e: Exception) {
-            UpdateResult.Failed(e.message ?: "检查更新失败")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            UpdateResult.Failed(friendly(e))
         }
     }
 
     private suspend fun checkReleases(owner: String, repo: String): UpdateResult {
         return try {
             val body = client.fetchRaw(
-                "https://api.github.com/repos/$owner/$repo/releases/latest"
+                "https://api.github.com/repos/$owner/$repo/releases/latest",
+                CHECK_TIMEOUT_MS,
             )
             val obj = JsonParser.parseString(body).asJsonObject
             if (obj.has("message") && !obj.has("tag_name")) {
@@ -149,8 +160,28 @@ class UpdateManager(
             } else {
                 UpdateResult.UpToDate(name)
             }
-        } catch (e: Exception) {
-            UpdateResult.Failed(e.message ?: "检查更新失败")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            UpdateResult.Failed(friendly(e))
+        }
+    }
+
+    /**
+     * Turn a transport failure into something a user can act on.
+     *
+     * A bare `SocketTimeoutException` message tells them nothing; the honest
+     * summary is that GitHub could not be reached and the library still works.
+     */
+    private fun friendly(e: Throwable): String {
+        val raw = e.message.orEmpty()
+        return when {
+            raw.contains("timeout", true) || e is java.net.SocketTimeoutException ->
+                "连接 GitHub 超时。可以稍后重试，或在「设置 → 网络线路」里换一条线路。"
+            raw.contains("Unable to resolve host", true) ->
+                "无法解析 GitHub 域名，请检查网络连接。"
+            raw.isBlank() -> "检查更新失败"
+            else -> raw
         }
     }
 
@@ -179,7 +210,9 @@ class UpdateManager(
             .header("User-Agent", Http.USER_AGENT)
             .build()
 
-        Http.client.newCall(req).execute().use { resp ->
+        // A whole-call ceiling: an APK is ~10 MB, so if it has not arrived in ten
+        // minutes the route is not going to deliver it.
+        Http.execute(req, DOWNLOAD_TIMEOUT_MS).use { resp ->
             if (!resp.isSuccessful) error("下载失败：HTTP ${resp.code}")
             val body = resp.body ?: error("下载失败：内容为空")
             val total = body.contentLength()
@@ -266,5 +299,18 @@ class UpdateManager(
             val patch = nums.getOrElse(2) { 0 }
             return major * 10000 + minor * 100 + patch
         }
+
+        /**
+         * Whole-call ceiling for a check.
+         *
+         * The manifest and the releases API are both small JSON documents. Four
+         * routes each getting a full connect timeout is what made the card look
+         * stuck; fifteen seconds is long enough for a slow-but-working route and
+         * short enough that a dead one reports a failure the user can act on.
+         */
+        private const val CHECK_TIMEOUT_MS = 15_000L
+
+        /** A whole APK transfer. Generous, but bounded. */
+        private const val DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000L
     }
 }

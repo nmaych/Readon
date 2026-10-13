@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.sp
 import com.readon.reader.ReadonApp
 import com.readon.reader.data.Book
 import com.readon.reader.data.LocalImport
+import com.readon.reader.data.ShelfLabels
 import com.readon.reader.data.formatSize
 import com.readon.reader.ui.collectAsStateSafe
 import com.readon.reader.ui.components.BookCover
@@ -90,6 +91,8 @@ fun ShelfScreen(
     toast: (String) -> Unit,
     onOpen: (Book) -> Unit,
     onBrowse: () -> Unit,
+    /** Bumped when the reader closes, so progress changes are picked up. */
+    dataRevision: Int = 0,
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -103,8 +106,11 @@ fun ShelfScreen(
     var importing by remember { mutableStateOf(false) }
 
     // The shelf must reflect reading progress as the user comes back from a
-    // book, so it reloads on every settings revision and whenever it appears.
+    // book, so it reloads on every settings revision, whenever it appears, and
+    // when the reader is closed over it. It also follows the store's own revision
+    // so a download that finishes while this tab is open appears immediately.
     val revision by app.prefs.revision.collectAsStateSafe()
+    val storeRevision by app.store.revision.collectAsStateSafe()
     var refreshTick by remember { mutableStateOf(0) }
 
     /**
@@ -117,8 +123,11 @@ fun ShelfScreen(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
-        scope.launch {
-            importing = true
+        importing = true
+        // Importing runs on the application scope. On the screen's scope it was
+        // cancelled the moment the user left the tab, which silently abandoned
+        // every remaining file in a multi-file import.
+        app.launch {
             var ok = 0
             val problems = ArrayList<String>()
             for (uri in uris) {
@@ -133,12 +142,18 @@ fun ShelfScreen(
                     }
                     LocalImport.import(context, uri, app.store)
                     ok++
-                } catch (e: Exception) {
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
                     problems.add(e.message ?: "导入失败")
                 }
             }
             importing = false
             refreshTick++
+            // The store may have grown while the shelf was showing, so re-read
+            // the listing here rather than waiting for a recomposition.
+            books = app.store.load()
+            usedBytes = app.store.usedBytes()
             when {
                 ok > 0 && problems.isEmpty() -> toast("已导入 $ok 本书")
                 ok > 0 -> toast("已导入 $ok 本，${problems.size} 本失败：${problems.first()}")
@@ -147,7 +162,7 @@ fun ShelfScreen(
         }
     }
 
-    LaunchedEffect(revision, refreshTick) {
+    LaunchedEffect(revision, storeRevision, refreshTick, dataRevision) {
         books = app.store.load()
         usedBytes = app.store.usedBytes()
         loaded = true
@@ -161,6 +176,12 @@ fun ShelfScreen(
             ShelfSort.Author -> books.sortedWith(compareBy({ it.folder }, { it.title }))
         }
     }
+
+    // One "now" for the whole grid, taken when the listing is (re)read rather
+    // than once per item. Reading the clock during composition would make the
+    // relative times disagree between items, and re-reading it on every
+    // recomposition would let a card's label change while the user looks at it.
+    val now = remember(books, refreshTick, dataRevision) { System.currentTimeMillis() }
 
     Column(
         Modifier
@@ -269,6 +290,7 @@ fun ShelfScreen(
                 items(sorted, key = { it.id }) { book ->
                     ShelfItem(
                         book = book,
+                        now = now,
                         onOpen = { onOpen(book) },
                         onLongPress = { pendingDelete = book },
                         onDelete = { pendingDelete = book },
@@ -313,6 +335,7 @@ fun ShelfScreen(
 @Composable
 private fun ShelfItem(
     book: Book,
+    now: Long,
     onOpen: () -> Unit,
     onLongPress: () -> Unit,
     onDelete: () -> Unit,
@@ -374,6 +397,33 @@ private fun ShelfItem(
                     modifier = Modifier.size(15.dp),
                 )
             }
+        }
+
+        // The chapter position, when the reader has recorded one. Shown next to
+        // the percentage rather than instead of it: "12/340 章" says where you
+        // are, the percentage says how far through the book that is, and the two
+        // legitimately disagree when chapters are of different lengths.
+        ShelfLabels.chapterProgress(book)?.let { chapters ->
+            Text(
+                text = chapters,
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        // When the book was last opened. Relative for anything recent, because
+        // "今天 14:30" answers "did I read this today?" and a full date does not.
+        // A book that has never been opened shows nothing rather than 1970.
+        ShelfLabels.lastReadLine(book.lastReadAt, now)?.let { line ->
+            Text(
+                text = line,
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

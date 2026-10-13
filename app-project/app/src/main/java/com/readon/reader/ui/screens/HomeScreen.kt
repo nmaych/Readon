@@ -1,6 +1,5 @@
 package com.readon.reader.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,7 +23,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DownloadDone
-import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.CloudOff
@@ -32,7 +30,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -44,14 +41,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -60,12 +54,10 @@ import com.readon.reader.ReadonApp
 import com.readon.reader.data.Book
 import com.readon.reader.data.BookCollection
 import com.readon.reader.data.formatSize
-import com.readon.reader.net.LibraryException
 import com.readon.reader.ui.collectAsStateSafe
 import com.readon.reader.ui.components.BookCover
 import com.readon.reader.ui.components.Chip
 import com.readon.reader.ui.components.EmptyState
-import kotlinx.coroutines.launch
 
 /**
  * The online library.
@@ -73,6 +65,13 @@ import kotlinx.coroutines.launch
  * One recursive listing of the configured repository, grouped by the folder each
  * file came from -- the library keeps collections as folders (`默认/书名.txt`),
  * so the folder name is the collection.
+ *
+ * The listing itself is owned by [com.readon.reader.data.OnlineLibrary] at
+ * application scope, not by this screen. Compose disposes this composable every
+ * time the user visits another tab, so holding the library here meant re-running
+ * the whole multi-host listing race on every return to 主页 -- and it cancelled
+ * any download that was in flight. This screen now only *renders* that state and
+ * asks for a load when the configuration is new.
  *
  * Each row offers the two things a reader wants from a remote library: open it
  * now without keeping a copy, or download it to the shelf.
@@ -85,57 +84,27 @@ fun HomeScreen(
     toast: (String) -> Unit,
     onOpen: (Book) -> Unit,
 ) {
-    val scope = rememberCoroutineScope()
+    val library = app.library
 
-    var books by remember { mutableStateOf<List<Book>>(emptyList()) }
-    var loading by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var truncated by remember { mutableStateOf(false) }
-    /** Which route answered, shown so a blocked network is diagnosable. */
-    var via by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
     var selectedCollection by remember { mutableStateOf<String?>(null) }
-
-    // Which books already have a local copy, so the row can say so.
-    var downloaded by remember { mutableStateOf<Set<String>>(emptySet()) }
-    // Books being downloaded right now, by id, with 0f..1f progress.
-    var downloading by remember { mutableStateOf<Set<String>>(emptySet()) }
-    val progress = remember { mutableStateMapOf<String, Float>() }
 
     // Re-read the source whenever settings change it.
     val revision by app.prefs.revision.collectAsStateSafe()
     val source = remember(revision) { app.prefs.source }
 
-    suspend fun refreshDownloaded() {
-        downloaded = app.store.load().map { it.id }.toSet()
+    // Load once per configuration. The holder short-circuits when the cached
+    // listing is still valid, so returning to this tab is free.
+    LaunchedEffect(source, revision) {
+        library.ensureLoaded()
+        library.refreshDownloaded()
     }
 
-    suspend fun loadLibrary() {
-        loading = true
-        error = null
-        try {
-            val listing = app.github.listBooks(source)
-            books = listing.books
-            truncated = listing.truncated
-            via = listing.via
-            if (listing.books.isEmpty()) {
-                error = "仓库里没有找到可阅读的文件"
-            }
-        } catch (e: LibraryException) {
-            error = e.message
-            books = emptyList()
-        } catch (e: Exception) {
-            error = e.message ?: "加载失败"
-            books = emptyList()
-        } finally {
-            loading = false
-        }
-    }
-
-    LaunchedEffect(source) {
-        refreshDownloaded()
-        loadLibrary()
-    }
+    val books = library.books
+    val loading = library.loading
+    val error = library.error
+    val truncated = library.truncated
+    val downloaded = library.downloadedIds
 
     val collections: List<BookCollection> = remember(books, query, selectedCollection) {
         val filtered = if (query.isBlank()) books else books.filter {
@@ -177,12 +146,13 @@ fun HomeScreen(
                 }
             },
             actions = {
-                IconButton(onClick = {
-                    scope.launch {
-                        refreshDownloaded()
-                        loadLibrary()
-                    }
-                }, enabled = !loading) {
+                IconButton(
+                    onClick = {
+                        library.ensureLoaded(force = true)
+                        library.refreshDownloaded()
+                    },
+                    enabled = !loading,
+                ) {
                     if (loading) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(20.dp),
@@ -283,9 +253,9 @@ fun HomeScreen(
                     EmptyState(
                         icon = Icons.Outlined.CloudOff,
                         title = "无法加载书库",
-                        message = error ?: "",
+                        message = error.orEmpty(),
                         action = {
-                            TextButton(onClick = { scope.launch { loadLibrary() } }) {
+                            TextButton(onClick = { library.ensureLoaded(force = true) }) {
                                 Text("重试")
                             }
                         },
@@ -325,37 +295,16 @@ fun HomeScreen(
                                 items = collection.books,
                                 key = { _, b -> b.id },
                             ) { _, book ->
+                                val download = library.downloads[book.id]
                                 LibraryRow(
                                     book = book,
                                     isDownloaded = book.id in downloaded,
-                                    isDownloading = book.id in downloading,
-                                    downloadProgress = progress[book.id],
+                                    download = download,
                                     onOpen = { onOpen(book) },
                                     onDownload = {
-                                        if (book.id in downloading) return@LibraryRow
-                                        downloading = downloading + book.id
-                                        progress[book.id] = 0f
-                                        scope.launch {
-                                            try {
-                                                // Stream straight to the destination
-                                                // file: this library's books reach
-                                                // 75 MB, far too large to buffer.
-                                                val target = app.store.targetFileFor(book)
-                                                val written = app.github.downloadTo(
-                                                    source = book.source,
-                                                    path = book.path,
-                                                    target = target,
-                                                ) { p -> progress[book.id] = p }
-                                                app.store.register(book, target, written)
-                                                refreshDownloaded()
-                                                toast("已下载：${book.title}")
-                                            } catch (e: Exception) {
-                                                toast(e.message ?: "下载失败")
-                                            } finally {
-                                                downloading = downloading - book.id
-                                                progress.remove(book.id)
-                                            }
-                                        }
+                                        // Runs at application scope, so navigating
+                                        // away no longer kills the transfer.
+                                        library.download(book) { message -> toast(message) }
                                     },
                                 )
                             }
@@ -418,8 +367,7 @@ private fun FilterPill(label: String, selected: Boolean, onClick: () -> Unit) {
 private fun LibraryRow(
     book: Book,
     isDownloaded: Boolean,
-    isDownloading: Boolean,
-    downloadProgress: Float?,
+    download: com.readon.reader.data.OnlineLibrary.Download?,
     onOpen: () -> Unit,
     onDownload: () -> Unit,
 ) {
@@ -460,39 +408,61 @@ private fun LibraryRow(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    if (isDownloaded) {
-                        Spacer(Modifier.height(4.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Filled.DownloadDone,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.secondary,
-                                modifier = Modifier.size(13.dp),
-                            )
-                            Spacer(Modifier.width(4.dp))
+                    when {
+                        download != null -> {
+                            Spacer(Modifier.height(4.dp))
                             Text(
-                                "已在书架",
+                                download.stage,
                                 fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.secondary,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
+                        }
+
+                        isDownloaded -> {
+                            Spacer(Modifier.height(4.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Filled.DownloadDone,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.secondary,
+                                    modifier = Modifier.size(13.dp),
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    "已在书架",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.secondary,
+                                )
+                            }
                         }
                     }
                 }
 
-                if (isDownloading) {
+                if (download != null) {
                     // A ring is not enough here: these books take minutes, so the
-                    // percentage is shown next to it.
+                    // percentage is shown next to it -- and when the route sends no
+                    // Content-Length there is no percentage to show, so the ring
+                    // spins rather than sitting at a fixed 0%.
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(
-                            progress = { downloadProgress ?: 0f },
-                            modifier = Modifier
-                                .padding(horizontal = 10.dp)
-                                .size(24.dp),
-                            strokeWidth = 2.dp,
-                        )
-                        if (downloadProgress != null) {
+                        if (download.indeterminate) {
+                            CircularProgressIndicator(
+                                modifier = Modifier
+                                    .padding(horizontal = 10.dp)
+                                    .size(24.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        } else {
+                            CircularProgressIndicator(
+                                progress = { download.progress },
+                                modifier = Modifier
+                                    .padding(horizontal = 10.dp)
+                                    .size(24.dp),
+                                strokeWidth = 2.dp,
+                            )
                             Text(
-                                "${(downloadProgress * 100).toInt()}%",
+                                "${(download.progress * 100).toInt()}%",
                                 fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

@@ -36,18 +36,27 @@ object Chapters {
     private const val MIN_CHAPTER_CHARS = 120
     private const val MAX_CHAPTERS = 2000
 
+    /** Longest line that can still be a heading rather than a paragraph. */
+    private const val MAX_HEADING_CHARS = 60
+
     fun split(text: String): List<Chapter> {
         if (text.isEmpty()) return emptyList()
 
         val hits = ArrayList<Pair<String, Int>>()
+        // Scan by line *without* materialising each one. The obvious
+        // `substring(lineStart, lineEnd)` allocated a String for every line of the
+        // book -- half a million of them for a long novel -- and this runs on the
+        // path that shows "正在排版…". Only lines short enough to be a heading are
+        // ever turned into a String.
         var lineStart = 0
         while (lineStart <= text.length) {
             var lineEnd = text.indexOf('\n', lineStart)
             if (lineEnd < 0) lineEnd = text.length
-            val line = text.substring(lineStart, lineEnd)
+            val length = lineEnd - lineStart
             // Only consider short lines: a 200-character "line" that happens to
             // start with 第一章 is a paragraph, not a heading.
-            if (line.length in 1..60) {
+            if (length in 1..MAX_HEADING_CHARS) {
+                val line = text.substring(lineStart, lineEnd)
                 for (p in PATTERNS) {
                     if (p.matches(line)) {
                         hits.add(line.trim() to lineStart)

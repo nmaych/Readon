@@ -41,44 +41,95 @@ class UnsupportedBookException(message: String) : Exception(message)
  *   * `epub` -- the zip is walked for its OPF spine, and each spine document
  *     becomes a chapter.
  *   * `pdf` -- not rendered here. See [UnsupportedBookException].
+ *
+ * ## Why online reading goes through a temp file
+ *
+ * The first version fetched the whole book into a `ByteArray` and then decoded
+ * it, which is two full copies of a file that can be 75 MB before a single
+ * character reaches the reader -- and the second copy is a `String` of up to
+ * three bytes per character. That is what made "在线阅读" stall on "正在排版…" and
+ * then die on low-memory devices.
+ *
+ * A text book is now streamed to a cache file and decoded from disk, so peak
+ * memory is one character buffer and the result. EPUB is the exception and stays
+ * in memory, because reading a zip genuinely needs random access to the bytes.
+ *
+ * @param onStage reports what is happening, so the reader can say "正在下载…"
+ *   rather than showing a single unchanging "正在排版…".
  */
 class BookLoader(
     private val context: Context,
     private val client: GithubClient,
 ) {
 
-    suspend fun load(book: Book): BookContent = withContext(Dispatchers.IO) {
-        val bytes = readBytes(book)
-        when (book.formatEnum) {
-            BookFormat.TXT, BookFormat.MD -> textContent(book, bytes)
-            BookFormat.HTML -> textContent(book, bytes, stripMarkup = true)
-            BookFormat.EPUB -> epubContent(book, bytes)
-            BookFormat.PDF -> throw UnsupportedBookException(
-                "PDF 暂不支持在线阅读。请先下载，再用系统应用打开。"
-            )
-            null -> throw UnsupportedBookException("不支持的文件格式")
-        }
-    }
-
-    private suspend fun readBytes(book: Book): ByteArray {
-        val local = book.localFile
-        if (local != null) {
-            val f = File(local)
-            if (f.exists()) return f.readBytes()
-            // The record survived but the file did not -- a manual cleanup, or a
-            // restored backup. A locally imported book has no remote to fall back
-            // to, so say so plainly instead of failing with a network error.
-            if (book.isLocal) {                throw UnsupportedBookException(
-                    "文件已不在设备上，可能被清理掉了。请重新从本地导入。"
+    suspend fun load(book: Book, onStage: (String) -> Unit = {}): BookContent =
+        withContext(Dispatchers.IO) {
+            when (book.formatEnum) {
+                BookFormat.TXT, BookFormat.MD -> textContent(book, stripMarkup = false, onStage)
+                BookFormat.HTML -> textContent(book, stripMarkup = true, onStage)
+                BookFormat.EPUB -> epubContent(book, onStage)
+                BookFormat.PDF -> throw UnsupportedBookException(
+                    "PDF 暂不支持在线阅读。请先下载，再用系统应用打开。"
                 )
+                null -> throw UnsupportedBookException("不支持的文件格式")
             }
-            // Otherwise fall through to the network rather than failing.
         }
-        return client.fetchText(book.source, book.path)
+
+    /**
+     * The local copy, or null when there is none and the network must be used.
+     *
+     * A record can outlive its file -- a manual cleanup, or a restored backup --
+     * and a locally imported book has no remote to fall back to, so that case is
+     * reported plainly instead of surfacing as a network error.
+     */
+    private fun localFileOf(book: Book): File? {
+        val local = book.localFile ?: return null
+        val f = File(local)
+        if (f.exists() && f.length() > 0) return f
+        if (book.isLocal) {
+            throw UnsupportedBookException("文件已不在设备上，可能被清理掉了。请重新从本地导入。")
+        }
+        return null
     }
 
-    private fun textContent(book: Book, bytes: ByteArray, stripMarkup: Boolean = false): BookContent {
-        val decoded = TextCodec.decode(bytes)
+    private suspend fun textContent(
+        book: Book,
+        stripMarkup: Boolean,
+        onStage: (String) -> Unit,
+    ): BookContent {
+        val local = localFileOf(book)
+        if (local != null) {
+            onStage("正在排版…")
+            return decodeText(book, local, stripMarkup)
+        }
+
+        // Online: stream to a cache file, decode from there, then remove it.
+        onStage("正在连接线路…")
+        val temp = File(context.cacheDir, "readon-online").apply { mkdirs() }
+            .let { File(it, "online-${book.id.hashCode()}.${book.format}") }
+        try {
+            onStage("正在下载…")
+            client.downloadTo(
+                source = book.source,
+                path = book.path,
+                target = temp,
+                expectedSize = book.size,
+                onProgress = { p -> onStage("正在下载… ${(p * 100).toInt()}%") },
+                onStage = onStage,
+            )
+            onStage("正在排版…")
+            return decodeText(book, temp, stripMarkup)
+        } finally {
+            runCatching { temp.delete() }
+        }
+    }
+
+    private fun decodeText(
+        book: Book,
+        file: File,
+        stripMarkup: Boolean,
+    ): BookContent {
+        val decoded = TextCodec.decodeFile(file)
         val text = (if (stripMarkup) HtmlText.strip(decoded.text) else decoded.text)
             .replace("\r\n", "\n")
             .replace('\r', '\n')
@@ -98,7 +149,22 @@ class BookLoader(
      * path is discovered through `META-INF/container.xml` rather than guessed.
      * Spine order, not file order, is what defines reading order.
      */
-    private fun epubContent(book: Book, bytes: ByteArray): BookContent {
+    private suspend fun epubContent(book: Book, onStage: (String) -> Unit): BookContent {
+        val local = localFileOf(book)
+        val bytes = if (local != null) {
+            onStage("正在排版…")
+            local.readBytes()
+        } else {
+            onStage("正在连接线路…")
+            client.fetchBytes(
+                source = book.source,
+                path = book.path,
+                limit = GithubClient.MAX_TEXT_BYTES,
+                onStage = onStage,
+            )
+        }
+        onStage("正在排版…")
+
         val entries = HashMap<String, ByteArray>()
         ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
             while (true) {

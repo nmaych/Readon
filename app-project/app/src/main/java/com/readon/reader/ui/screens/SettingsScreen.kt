@@ -73,6 +73,7 @@ import com.readon.reader.net.ListSource
 import com.readon.reader.net.Mirror
 import com.readon.reader.ui.collectAsStateSafe
 import com.readon.reader.ui.theme.ReaderTheme
+import com.readon.reader.update.UpdateCenter
 import com.readon.reader.update.UpdateResult
 import kotlinx.coroutines.launch
 
@@ -101,31 +102,20 @@ fun SettingsScreen(
     var showAbout by remember { mutableStateOf(false) }
 
     var cachedBytes by remember { mutableStateOf(0L) }
-    var updateState by remember { mutableStateOf<UpdateUi>(UpdateUi.Idle) }
     var probeState by remember { mutableStateOf<ProbeState>(ProbeState.Idle) }
+
+    // The update check lives at application scope: a check started here used to be
+    // cancelled the moment the user switched tabs, which left the card stuck on
+    // "正在检查… / 连接 GitHub 中" and restarted the check on every visit.
+    val updateState = app.updateCenter.state
 
     LaunchedEffect(revision) {
         cachedBytes = app.store.usedBytes()
     }
 
-    // Check for updates once when the screen first appears, if the user asked
-    // for automatic checks. The timestamp guard keeps tab-switching from
-    // hammering the GitHub API.
+    // Ask once per appearance; the centre itself decides whether a check is due.
     LaunchedEffect(Unit) {
-        if (prefs.autoCheckUpdates &&
-            System.currentTimeMillis() - prefs.lastUpdateCheck > CHECK_INTERVAL_MS
-        ) {
-            updateState = UpdateUi.Checking
-            val result = app.updates.check()
-            prefs.lastUpdateCheck = System.currentTimeMillis()
-            updateState = when (result) {
-                is UpdateResult.Available ->
-                    if (result.versionCode == prefs.ignoredVersionCode) UpdateUi.Idle
-                    else UpdateUi.Available(result)
-                is UpdateResult.UpToDate -> UpdateUi.UpToDate
-                is UpdateResult.Failed -> UpdateUi.Failed(result.message)
-            }
-        }
+        app.updateCenter.ensureChecked()
     }
 
     Column(
@@ -158,42 +148,19 @@ fun SettingsScreen(
             item {
                 UpdateCard(
                     state = updateState,
-                    onCheck = {
-                        scope.launch {
-                            updateState = UpdateUi.Checking
-                            val result = app.updates.check()
-                            prefs.lastUpdateCheck = System.currentTimeMillis()
-                            updateState = when (result) {
-                                is UpdateResult.Available -> UpdateUi.Available(result)
-                                is UpdateResult.UpToDate -> UpdateUi.UpToDate
-                                is UpdateResult.Failed -> UpdateUi.Failed(result.message)
-                            }
-                        }
-                    },
+                    onCheck = { app.updateCenter.check() },
                     onDownload = { available ->
-                        scope.launch {
-                            try {
-                                val file = app.updates.download(available) { p ->
-                                    updateState = UpdateUi.Downloading(p)
-                                }
-                                if (!app.updates.canInstall()) {
-                                    toast("请先允许 Readon 安装应用")
-                                    app.updates.requestInstallPermission()
-                                    updateState = UpdateUi.ReadyToInstall(available, file)
-                                } else {
-                                    updateState = UpdateUi.ReadyToInstall(available, file)
-                                    app.updates.install(file)
-                                }
-                            } catch (e: Exception) {
-                                updateState = UpdateUi.Failed(e.message ?: "下载失败")
+                        app.updateCenter.download(available) { file ->
+                            if (!app.updates.canInstall()) {
+                                toast("请先允许 Readon 安装应用")
+                                app.updates.requestInstallPermission()
+                            } else {
+                                app.updates.install(file)
                             }
                         }
                     },
-                    onInstall = { available, file -> app.updates.install(file) },
-                    onIgnore = { available ->
-                        prefs.ignoredVersionCode = available.versionCode
-                        updateState = UpdateUi.Idle
-                    },
+                    onInstall = { _, file -> app.updates.install(file) },
+                    onIgnore = { available -> app.updateCenter.ignore(available) },
                 )
             }
 
@@ -299,9 +266,11 @@ fun SettingsScreen(
                             Text("修改书库")
                         }
                         OutlinedButton(onClick = {
-                            scope.launch {
-                                toast("正在刷新书库索引…")
-                            }
+                            // This button used to show a toast and do nothing at
+                            // all, which is worse than no button: the library was
+                            // never actually re-read.
+                            app.library.ensureLoaded(force = true)
+                            toast("正在刷新书库…")
                         }) {
                             Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
@@ -569,8 +538,6 @@ fun SettingsScreen(
     }
 }
 
-private const val CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
-
 /** State of the "test the routes" action. */
 private sealed interface ProbeState {
     data object Idle : ProbeState
@@ -605,15 +572,7 @@ private fun FlowRowOf(
     }
 }
 
-/** Update flow states the card renders. */
-private sealed interface UpdateUi {    data object Idle : UpdateUi
-    data object Checking : UpdateUi
-    data object UpToDate : UpdateUi
-    data class Failed(val message: String) : UpdateUi
-    data class Available(val info: UpdateResult.Available) : UpdateUi
-    data class Downloading(val progress: Float) : UpdateUi
-    data class ReadyToInstall(val info: UpdateResult.Available, val file: java.io.File) : UpdateUi
-}
+/** Update flow states the card renders, owned by the app-scoped update centre. */
 
 /** A snapshot of the settings, read once per revision. */
 private data class SettingsSnapshot(
@@ -675,38 +634,38 @@ private data class SettingsSnapshot(
 
 @Composable
 private fun UpdateCard(
-    state: UpdateUi,
+    state: UpdateCenter.State,
     onCheck: () -> Unit,
     onDownload: (UpdateResult.Available) -> Unit,
     onInstall: (UpdateResult.Available, java.io.File) -> Unit,
     onIgnore: (UpdateResult.Available) -> Unit,
 ) {
     val (accent, title, body) = when (state) {
-        is UpdateUi.Idle -> Triple(
+        is UpdateCenter.State.Idle -> Triple(
             MaterialTheme.colorScheme.primary,
             "检查更新",
             "Readon 会从 GitHub 获取新版本。",
         )
-        is UpdateUi.Checking -> Triple(
+        is UpdateCenter.State.Checking -> Triple(
             MaterialTheme.colorScheme.primary, "正在检查…", "连接 GitHub 中",
         )
-        is UpdateUi.UpToDate -> Triple(
+        is UpdateCenter.State.UpToDate -> Triple(
             MaterialTheme.colorScheme.secondary, "已是最新版本",
             "当前版本 ${BuildConfig.VERSION_NAME}",
         )
-        is UpdateUi.Failed -> Triple(
+        is UpdateCenter.State.Failed -> Triple(
             MaterialTheme.colorScheme.error, "检查失败", state.message,
         )
-        is UpdateUi.Available -> Triple(
+        is UpdateCenter.State.Available -> Triple(
             MaterialTheme.colorScheme.secondary,
             "发现新版本 ${state.info.versionName}",
             state.info.notes.lineSequence().firstOrNull { it.isNotBlank() }
                 ?.take(90) ?: "点击下载并安装。",
         )
-        is UpdateUi.Downloading -> Triple(
+        is UpdateCenter.State.Downloading -> Triple(
             MaterialTheme.colorScheme.primary, "正在下载更新…", "",
         )
-        is UpdateUi.ReadyToInstall -> Triple(
+        is UpdateCenter.State.ReadyToInstall -> Triple(
             MaterialTheme.colorScheme.secondary, "下载完成",
             "点击安装 ${state.info.versionName}",
         )
@@ -721,9 +680,10 @@ private fun UpdateCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector = when (state) {
-                        is UpdateUi.Available, is UpdateUi.ReadyToInstall -> Icons.Filled.Download
-                        is UpdateUi.UpToDate -> Icons.Filled.Check
-                        is UpdateUi.Failed -> Icons.Filled.Info
+                        is UpdateCenter.State.Available,
+                        is UpdateCenter.State.ReadyToInstall -> Icons.Filled.Download
+                        is UpdateCenter.State.UpToDate -> Icons.Filled.Check
+                        is UpdateCenter.State.Failed -> Icons.Filled.Info
                         else -> Icons.Filled.CloudSync
                     },
                     contentDescription = null,
@@ -751,7 +711,7 @@ private fun UpdateCard(
             }
 
             when (state) {
-                is UpdateUi.Downloading -> {
+                is UpdateCenter.State.Downloading -> {
                     Spacer(Modifier.height(10.dp))
                     if (state.progress >= 0f) {
                         LinearProgressIndicator(
@@ -763,7 +723,7 @@ private fun UpdateCard(
                     }
                 }
 
-                is UpdateUi.Available -> {
+                is UpdateCenter.State.Available -> {
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = { onDownload(state.info) }) {
@@ -777,7 +737,7 @@ private fun UpdateCard(
                     }
                 }
 
-                is UpdateUi.ReadyToInstall -> {
+                is UpdateCenter.State.ReadyToInstall -> {
                     Spacer(Modifier.height(12.dp))
                     Button(onClick = { onInstall(state.info, state.file) }) {
                         Text("立即安装")
@@ -786,7 +746,10 @@ private fun UpdateCard(
 
                 else -> {
                     Spacer(Modifier.height(12.dp))
-                    OutlinedButton(onClick = onCheck, enabled = state !is UpdateUi.Checking) {
+                    OutlinedButton(
+                        onClick = onCheck,
+                        enabled = state !is UpdateCenter.State.Checking,
+                    ) {
                         Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
                         Text("检查更新")

@@ -84,6 +84,8 @@ import com.readon.reader.ui.collectAsStateSafe
 import com.readon.reader.ui.components.EmptyState
 import com.readon.reader.ui.theme.ReaderTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -102,7 +104,6 @@ fun ReaderScreen(
     app: ReadonApp,
     book: Book,
     onClose: () -> Unit,
-    toast: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -124,14 +125,30 @@ fun ReaderScreen(
 
     LaunchedEffect(book.id, loadAttempt) {
         state.begin(book)
+        // The loader reports its stage from the IO thread. A StateFlow is safe to
+        // write from there, and this collector moves the value into Compose state
+        // on the composition's own dispatcher.
+        val stage = MutableStateFlow(state.stage)
+        val stageCollector = launch { stage.collect { state.stage = it } }
         try {
             val loader = BookLoader(context, app.github)
-            val content = withContext(Dispatchers.IO) { loader.load(book) }
+            val content = withContext(Dispatchers.IO) {
+                loader.load(book) { s -> stage.value = s }
+            }
             state.succeed(content, book.chapterIndex, 0)
         } catch (e: UnsupportedBookException) {
             state.fail(e.message ?: "无法打开")
-        } catch (e: Exception) {
-            state.fail(e.message ?: "加载失败")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // The screen is going away; leave the state alone.
+            throw e
+        } catch (e: Throwable) {
+            // `Throwable`, not `Exception`: an OutOfMemoryError while decoding a
+            // large book is exactly the case that left the reader stuck on
+            // "正在排版…" forever, because an Error sailed past the old catch and
+            // the status was never moved off Loading.
+            state.fail(e.message ?: "加载失败，请重试或先下载到书架")
+        } finally {
+            stageCollector.cancel()
         }
     }
 
@@ -160,7 +177,8 @@ fun ReaderScreen(
             .background(readerTheme.background)
     ) {
         when (val status = state.status) {
-            is ReaderState.Status.Idle, is ReaderState.Status.Loading -> LoadingView(readerTheme)
+            is ReaderState.Status.Idle, is ReaderState.Status.Loading ->
+                LoadingView(readerTheme, state.stage, onClose)
 
             is ReaderState.Status.Failed -> Box(
                 Modifier
@@ -194,8 +212,15 @@ fun ReaderScreen(
     }
 }
 
+/**
+ * The loading state.
+ *
+ * It shows the loader's current stage rather than a fixed message, and offers a
+ * way back: a book being fetched over a slow route can legitimately take a while,
+ * and a screen with no exit is indistinguishable from a frozen one.
+ */
 @Composable
-private fun LoadingView(theme: ReaderTheme) {
+private fun LoadingView(theme: ReaderTheme, stage: String, onClose: () -> Unit) {
     Column(
         Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -203,7 +228,11 @@ private fun LoadingView(theme: ReaderTheme) {
     ) {
         CircularProgressIndicator(strokeWidth = 3.dp, color = theme.secondaryText)
         Spacer(Modifier.height(14.dp))
-        Text("正在排版…", color = theme.secondaryText, fontSize = 14.sp)
+        Text(stage, color = theme.secondaryText, fontSize = 14.sp)
+        Spacer(Modifier.height(10.dp))
+        TextButton(onClick = onClose) {
+            Text("返回", color = theme.secondaryText)
+        }
     }
 }
 
@@ -306,6 +335,9 @@ private fun ReaderBody(
                 progress = state.progress(absolute),
                 charOffset = absolute,
                 chapterIndex = state.chapterIndex,
+                // The outline was built when the book loaded, so the shelf's
+                // "第 12 / 340 章" does not have to decode the book again.
+                chapterCount = content.chapters.size,
             )
         }
 

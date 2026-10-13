@@ -76,6 +76,17 @@ data class Book(
     val charOffset: Int = 0,
     /** Chapter index for formats that have chapters, minus one when they do not. */
     val chapterIndex: Int = -1,
+    /**
+     * How many chapters the book has, as counted when it was last opened.
+     *
+     * The shelf needs the total to show "第 12 / 340 章", and it cannot count them
+     * itself: building the outline means decoding and scanning the whole book,
+     * which is the expensive work the reader already did. Zero means "not known
+     * yet" -- a book that has never been opened, or a record written before this
+     * field existed (Gson leaves an absent field at its Java default, so old
+     * indexes read back as 0 rather than failing).
+     */
+    val chapterCount: Int = 0,
 ) {
     val downloaded: Boolean get() = localFile != null
 

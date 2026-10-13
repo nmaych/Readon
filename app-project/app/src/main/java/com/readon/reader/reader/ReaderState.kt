@@ -27,6 +27,14 @@ class ReaderState {
     var status: Status by mutableStateOf(Status.Idle)
         private set
 
+    /**
+     * What the loader is doing right now, for the loading view.
+     *
+     * The reader used to show a fixed "正在排版…" for the entire load, so a book
+     * being fetched over a slow route looked identical to one that had hung.
+     */
+    var stage: String by mutableStateOf("正在排版…")
+
     /** The book being read. */
     var book: Book? by mutableStateOf(null)
         private set
@@ -75,6 +83,7 @@ class ReaderState {
     fun begin(book: Book) {
         this.book = book
         status = Status.Loading
+        stage = "正在打开…"
         chapterIndex = book.chapterIndex
         pageInChapter = 0
         searchQuery = ""

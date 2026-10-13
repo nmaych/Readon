@@ -81,8 +81,8 @@ git push -u origin main
 `app-project/app/build.gradle.kts`：
 
 ```kotlin
-val appVersionCode: Int = (System.getenv("READON_VERSION_CODE") ?: "10002").toIntOrNull()
-val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.2"
+val appVersionCode: Int = (System.getenv("READON_VERSION_CODE") ?: "10003").toIntOrNull()
+val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.3"
 ```
 
 `versionCode` 的算法是 `major*10000 + minor*100 + patch`：
@@ -92,6 +92,7 @@ val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.2"
 | 1.0.0 | 10000 |
 | 1.0.1 | 10001 |
 | 1.0.2 | 10002 |
+| 1.0.3 | 10003 |
 | 1.1.0 | 10100 |
 | 2.0.0 | 20000 |
 
@@ -100,7 +101,7 @@ val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.2"
 在 `CHANGELOG.md` 顶部加一节：
 
 ```markdown
-## [1.0.2] - 2026-10-20
+## [1.0.3] - 2026-10-20
 
 ### Fixed
 
@@ -113,8 +114,14 @@ val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.2"
 
 ```powershell
 build.cmd assembleRelease
+copy app-project\app\build\outputs\apk\release\app-release.apk dist\readon-1.0.3.apk
+python tools\ci_release.py --name 1.0.3 --apk dist\readon-1.0.3.apk
 check.cmd
 ```
+
+`ci_release.py` 会重算 SHA-256、写好 `apkUrl`，并从 CHANGELOG 提取该版本的说明
+写入 `dist/update.json`。它会校验 `--name` 与 `--code` 是否自洽（`1.0.3` 必须是
+`10003`），并对写入结果做一次回读。
 
 `check.cmd` 会检查：
 
@@ -124,6 +131,14 @@ check.cmd
 - `.gitignore` 排除了 `keystore.properties`、`*.jks`、`local.properties`
 - `.gitignore` 里 `*.jar` 规则有 `!gradle/wrapper/gradle-wrapper.jar` 例外（少了它，克隆下来无法构建）
 - Gradle wrapper 三个文件齐全
+- 书籍逻辑：编码检测（UTF-8 / GBK / UTF-16 / BOM / ASCII 开头 + GBK 正文）、章节切分、分页游标（首页不能对着空列表取 `last()`）与书架标签的日期边界
+- 发布产物自洽：`dist/update.json` 的 `sha256` 与 `dist/readon-<版本>.apk` **实际**
+  一致，`versionCode` 算术正确，`apkUrl` 指向存在的文件名，说明与 CHANGELOG 章节逐字相同
+
+> 最后一项是 `tools/verify_release.py`，它**不 import** 发布脚本，而是从磁盘上的文件
+> 重新推导一遍。`check_repo_config.py` 只验证哈希「格式正确」，验证不了哈希「与实际
+> APK 一致」——后者才是应用拒绝安装更新包的原因。`dist/*.apk` 不入库，所以全新 clone
+> 上这一项会跳过而不是失败。
 
 同一个脚本在 CI 里也会跑（`ci.yml` 调 `tools/check_manifest.py` 和 `tools/check_repo_config.py`），所以本地过不了的东西不会推到远端才炸。
 
@@ -131,10 +146,10 @@ check.cmd
 
 ```powershell
 git add -A
-git commit -m "chore(release): 1.0.2"
+git commit -m "chore(release): 1.0.3"
 git push
-git tag v1.0.2
-git push origin v1.0.2
+git tag v1.0.3
+git push origin v1.0.3
 ```
 
 ### 4. 之后自动发生的事
@@ -153,7 +168,7 @@ git push origin v1.0.2
 
 ### 重新发布
 
-如果某次发布因为基础设施原因失败，可以在 Actions 页面手动触发 **Release** workflow，填已有的标签名（例如 `v1.0.2`）。它会覆盖已存在的 release 资产，不会重复创建。
+如果某次发布因为基础设施原因失败，可以在 Actions 页面手动触发 **Release** workflow，填已有的标签名（例如 `v1.0.3`）。它会覆盖已存在的 release 资产，不会重复创建。
 
 ---
 
@@ -189,7 +204,9 @@ LICENSE                     # MIT
 CHANGELOG.md                # 发布说明的唯一来源
 tools/
 ├── ci_release.py           # 版本号算术 + 清单盖章 + 从 CHANGELOG 提取说明
+├── verify_release.py       # 独立复算：清单与 dist 里的 APK 是否自洽
 ├── check_repo_config.py    # 上面那个检查清单
+├── check-book-logic.cmd    # 编码检测、章节切分、分页与书架标签（桌面运行）
 ├── make_icon.py            # 从设计原图派生各密度图标
 ├── check_mirrors.py        # 探测 GitHub 线路可用性
 └── verify_read_path.py     # 端到端验证读取链路
