@@ -71,7 +71,7 @@ jobs:
         run: sdkmanager --install 'platforms;android-34' 'build-tools;34.0.0'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           # The project's own wrapper is the authority on the Gradle version.
           validate-wrappers: true
