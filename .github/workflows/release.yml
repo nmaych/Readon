@@ -54,7 +54,7 @@ jobs:
           echo "code=$CODE"     >> "$GITHUB_OUTPUT"
           echo "Releasing $NAME (versionCode $CODE) from tag $TAG"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ steps.version.outputs.tag }}
 
