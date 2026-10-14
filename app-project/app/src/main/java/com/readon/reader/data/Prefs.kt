@@ -2,10 +2,28 @@ package com.readon.reader.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.readon.reader.ui.theme.ReaderFont
 import com.readon.reader.ui.theme.ReaderTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+
+/**
+ * How the reader moves through a book.
+ *
+ * `Paged` is the original left/right page turn; `Scroll` is one continuous
+ * column the user drags up and down.
+ */
+enum class ReadingMode(val label: String) {
+    Paged("翻页"),
+    Scroll("上下滚动"),
+    ;
+
+    companion object {
+        fun fromName(name: String?): ReadingMode =
+            entries.firstOrNull { it.name == name } ?: Paged
+    }
+}
 
 /**
  * App preferences.
@@ -113,9 +131,55 @@ class Prefs(context: Context) {
         get() = sp.getFloat(K_LINE_SPACING, 1.7f)
         set(v) = edit { putFloat(K_LINE_SPACING, v) }
 
+    /**
+     * The body typeface.
+     *
+     * Stored as the enum name, and resolved against the legacy [serif] flag when
+     * absent: a user upgrading from a version that only had "衬线字体" keeps the
+     * typeface they had chosen rather than being silently moved to a new default.
+     */
+    var readerFont: ReaderFont
+        get() = ReaderFont.resolve(
+            sp.getString(K_READER_FONT, null),
+            sp.getBoolean(K_SERIF, true),
+        )
+        set(v) = edit { putString(K_READER_FONT, v.name) }
+
+    /** Kept so the pre-1.0.4 preference still reads back; see [readerFont]. */
     var serif: Boolean
         get() = sp.getBoolean(K_SERIF, true)
         set(v) = edit { putBoolean(K_SERIF, v) }
+
+    /**
+     * Overrides for the reader's text and page colours.
+     *
+     * [ReaderInk.NONE] (0) means "use the theme's colour". An opaque colour always
+     * has a non-zero alpha byte, so no real colour collides with the sentinel --
+     * and a user who has never touched these gets the theme exactly as before.
+     */
+    var readerTextColor: Int
+        get() = sp.getInt(K_READER_TEXT_COLOR, ReaderInk.NONE)
+        set(v) = edit { putInt(K_READER_TEXT_COLOR, v) }
+
+    var readerBackgroundColor: Int
+        get() = sp.getInt(K_READER_BG_COLOR, ReaderInk.NONE)
+        set(v) = edit { putInt(K_READER_BG_COLOR, v) }
+
+    /** Page-turn animation style: slide or a plain fade. */
+    var pageAnimation: Int
+        get() = sp.getInt(K_PAGE_ANIM, PAGE_ANIM_SLIDE)
+        set(v) = edit { putInt(K_PAGE_ANIM, v) }
+
+    /**
+     * How the reader moves through the book: page-turning or a vertical scroll.
+     *
+     * A separate axis from the theme because it is about the *interaction*: some
+     * readers want a page with a defined end, others want the endless column a
+     * phone's web browser trained them on.
+     */
+    var readingMode: ReadingMode
+        get() = ReadingMode.fromName(sp.getString(K_READING_MODE, null))
+        set(v) = edit { putString(K_READING_MODE, v.name) }
 
     /** Keep the screen awake while a book is open. */
     var keepScreenOn: Boolean
@@ -169,6 +233,9 @@ class Prefs(context: Context) {
         const val THEME_LIGHT = 1
         const val THEME_DARK = 2
 
+        const val PAGE_ANIM_SLIDE = 0
+        const val PAGE_ANIM_NONE = 1
+
         private const val K_OWNER = "owner"
         private const val K_REPO = "repo"
         private const val K_BRANCH = "branch"
@@ -182,6 +249,11 @@ class Prefs(context: Context) {
         private const val K_FONT_SIZE = "font_size"
         private const val K_LINE_SPACING = "line_spacing"
         private const val K_SERIF = "serif"
+        private const val K_READER_FONT = "reader_font"
+        private const val K_READER_TEXT_COLOR = "reader_text_color"
+        private const val K_READER_BG_COLOR = "reader_bg_color"
+        private const val K_PAGE_ANIM = "page_anim"
+        private const val K_READING_MODE = "reading_mode"
         private const val K_KEEP_AWAKE = "keep_awake"
         private const val K_THEME_MODE = "theme_mode"
         private const val K_UPD_OWNER = "upd_owner"

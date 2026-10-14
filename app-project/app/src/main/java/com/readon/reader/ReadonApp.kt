@@ -3,6 +3,8 @@ package com.readon.reader
 import android.app.Application
 import android.content.Context
 import com.readon.reader.data.BookStore
+import com.readon.reader.data.BookmarkStore
+import com.readon.reader.data.OnlineCache
 import com.readon.reader.data.OnlineLibrary
 import com.readon.reader.data.Prefs
 import com.readon.reader.net.GithubClient
@@ -26,7 +28,19 @@ class ReadonApp : Application() {
         private set
     lateinit var store: BookStore
         private set
+    lateinit var bookmarks: BookmarkStore
+        private set
     lateinit var updates: UpdateManager
+        private set
+
+    /**
+     * Books read online, kept so a second read does not download them again.
+     *
+     * Deliberately separate from [store]: the shelf is what the user chose to
+     * keep, this is disposable, and the two have different sizes and different
+     * clear buttons. See [OnlineCache].
+     */
+    lateinit var onlineCache: OnlineCache
         private set
 
     /**
@@ -56,6 +70,8 @@ class ReadonApp : Application() {
         instance = this
         prefs = Prefs(this)
         store = BookStore(this)
+        bookmarks = BookmarkStore(this)
+        onlineCache = OnlineCache(this)
         updates = UpdateManager(this, prefs, github)
         library = OnlineLibrary(prefs, github, store, appScope)
         updateCenter = UpdateCenter(prefs, updates, appScope)

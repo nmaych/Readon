@@ -81,8 +81,8 @@ git push -u origin main
 `app-project/app/build.gradle.kts`：
 
 ```kotlin
-val appVersionCode: Int = (System.getenv("READON_VERSION_CODE") ?: "10003").toIntOrNull()
-val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.3"
+val appVersionCode: Int = (System.getenv("READON_VERSION_CODE") ?: "10005").toIntOrNull()
+val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.5"
 ```
 
 `versionCode` 的算法是 `major*10000 + minor*100 + patch`：
@@ -93,6 +93,8 @@ val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.3"
 | 1.0.1 | 10001 |
 | 1.0.2 | 10002 |
 | 1.0.3 | 10003 |
+| 1.0.4 | 10004 |
+| 1.0.5 | 10005 |
 | 1.1.0 | 10100 |
 | 2.0.0 | 20000 |
 
@@ -101,7 +103,7 @@ val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.3"
 在 `CHANGELOG.md` 顶部加一节：
 
 ```markdown
-## [1.0.3] - 2026-10-20
+## [1.0.5] - 2026-10-20
 
 ### Fixed
 
@@ -110,18 +112,23 @@ val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.3"
 
 这一节会**自动**变成 GitHub release 说明和应用内的更新说明，不需要另外写。
 
+> **清单提交这一步不能省。** `dist/update.json` 由 release workflow 提交回默认分支，应用从
+> 那里读它。1.0.5 修掉的 bug 就是这件事失败之后的后果：清单停在上一版，而应用当时只信清单，
+> 于是**谎报「已是最新版本」**。现在应用会同时查清单和 releases API，所以清单没更新不会再
+> 造成误报——但发版流程本身仍然应该走完整。
+
 ### 2. 本地验证（可选但建议）
 
 ```powershell
 build.cmd assembleRelease
-copy app-project\app\build\outputs\apk\release\app-release.apk dist\readon-1.0.3.apk
-python tools\ci_release.py --name 1.0.3 --apk dist\readon-1.0.3.apk
+copy app-project\app\build\outputs\apk\release\app-release.apk dist\readon-1.0.5.apk
+python tools\ci_release.py --name 1.0.5 --apk dist\readon-1.0.5.apk
 check.cmd
 ```
 
 `ci_release.py` 会重算 SHA-256、写好 `apkUrl`，并从 CHANGELOG 提取该版本的说明
-写入 `dist/update.json`。它会校验 `--name` 与 `--code` 是否自洽（`1.0.3` 必须是
-`10003`），并对写入结果做一次回读。
+写入 `dist/update.json`。它会校验 `--name` 与 `--code` 是否自洽（`1.0.5` 必须是
+`10005`），并对写入结果做一次回读。
 
 `check.cmd` 会检查：
 
@@ -131,7 +138,7 @@ check.cmd
 - `.gitignore` 排除了 `keystore.properties`、`*.jks`、`local.properties`
 - `.gitignore` 里 `*.jar` 规则有 `!gradle/wrapper/gradle-wrapper.jar` 例外（少了它，克隆下来无法构建）
 - Gradle wrapper 三个文件齐全
-- 书籍逻辑：编码检测（UTF-8 / GBK / UTF-16 / BOM / ASCII 开头 + GBK 正文）、章节切分、分页游标（首页不能对着空列表取 `last()`）与书架标签的日期边界
+- 书籍逻辑：编码检测（UTF-8 / GBK / UTF-16 / BOM / ASCII 开头 + GBK 正文）、章节切分、分页游标（首页不能对着空列表取 `last()`，以及章末空行不再产生空白页）、滚动分段、阅读配色对比度、书签、在线阅读缓存的命中判定与 LRU 淘汰、更新检查两个来源的合并规则（过期清单不得谎报「已是最新」），与书架标签的日期边界
 - 发布产物自洽：`dist/update.json` 的 `sha256` 与 `dist/readon-<版本>.apk` **实际**
   一致，`versionCode` 算术正确，`apkUrl` 指向存在的文件名，说明与 CHANGELOG 章节逐字相同
 
@@ -146,10 +153,10 @@ check.cmd
 
 ```powershell
 git add -A
-git commit -m "chore(release): 1.0.3"
+git commit -m "chore(release): 1.0.5"
 git push
-git tag v1.0.3
-git push origin v1.0.3
+git tag v1.0.5
+git push origin v1.0.5
 ```
 
 ### 4. 之后自动发生的事
@@ -168,7 +175,7 @@ git push origin v1.0.3
 
 ### 重新发布
 
-如果某次发布因为基础设施原因失败，可以在 Actions 页面手动触发 **Release** workflow，填已有的标签名（例如 `v1.0.3`）。它会覆盖已存在的 release 资产，不会重复创建。
+如果某次发布因为基础设施原因失败，可以在 Actions 页面手动触发 **Release** workflow，填已有的标签名（例如 `v1.0.5`）。它会覆盖已存在的 release 资产，不会重复创建。
 
 ---
 

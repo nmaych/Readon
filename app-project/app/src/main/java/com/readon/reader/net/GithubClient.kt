@@ -75,7 +75,7 @@ data class LibraryListing(
  */
 class GithubClient(private val prefs: Prefs) {
 
-    private fun request(url: String, rangeProbe: Boolean = false): Request {
+    private fun request(url: String, rangeProbe: Boolean = false, noCache: Boolean = false): Request {
         val b = Request.Builder()
             .url(url)
             .header("User-Agent", Http.USER_AGENT)
@@ -84,6 +84,16 @@ class GithubClient(private val prefs: Prefs) {
             // Two kilobytes proves a route carries this file, and is small enough
             // that probing every host costs less than one page of a book.
             b.header("Range", "bytes=0-2047")
+        }
+        if (noCache) {
+            // The GitHub proxies in front of raw.githubusercontent.com cache
+            // aggressively, and the update manifest is a file whose whole point is
+            // that it changes on release day. Without this, a proxy can keep
+            // answering with the previous version -- which the app then reports as
+            // "已是最新版本" while a newer release is published. `no-store` is added
+            // alongside `no-cache` because some CDNs honour only one of the two.
+            b.header("Cache-Control", "no-cache, no-store, max-age=0")
+            b.header("Pragma", "no-cache")
         }
         val t = prefs.token
         if (t.isNotBlank()) b.header("Authorization", "Bearer $t")
@@ -459,20 +469,42 @@ class GithubClient(private val prefs: Prefs) {
      * @param timeoutMs a whole-call ceiling. The update check passes a short one:
      *   "no answer" and "no update" are the same outcome to the user, and waiting
      *   a minute to learn it is worse than saying so quickly.
+     * @param noCache ask every hop to revalidate, and defeat the proxies that
+     *   ignore that. Used by the update check, where a cached copy of the manifest
+     *   is indistinguishable from "no update available".
      */
-    suspend fun fetchRaw(url: String, timeoutMs: Long = RAW_TIMEOUT_MS): String =
+    suspend fun fetchRaw(
+        url: String,
+        timeoutMs: Long = RAW_TIMEOUT_MS,
+        noCache: Boolean = false,
+    ): String =
         withContext(Dispatchers.IO) {
+            val target = if (noCache) bustCache(url) else url
             val candidates = buildList {
-                add(url)
-                if (url.startsWith("https://raw.githubusercontent.com/")) {
-                    add("https://ghproxy.net/$url")
-                    add("https://gh-proxy.com/$url")
-                    add("https://ghfast.top/$url")
+                add(target)
+                if (target.startsWith("https://raw.githubusercontent.com/")) {
+                    add("https://ghproxy.net/$target")
+                    add("https://gh-proxy.com/$target")
+                    add("https://ghfast.top/$target")
                 }
             }
-            val (body, _) = race(candidates, ::hostOf) { get(it, timeoutMs) }
+            val (body, _) = race(candidates, ::hostOf) { get(it, timeoutMs, noCache) }
             body
         }
+
+    /**
+     * Append a per-call nonce to [url].
+     *
+     * Headers alone are not enough: the GitHub proxies are caching layers that
+     * variously ignore `Cache-Control`, and the failure this prevents is silent --
+     * a stale manifest reads as a perfectly valid "no update available". A unique
+     * query string makes the cached entry unaddressable, which no cache can
+     * defeat. Existing query parameters are preserved.
+     */
+    private fun bustCache(url: String): String {
+        val sep = if (url.contains('?')) '&' else '?'
+        return "$url${sep}_readon=${System.currentTimeMillis()}"
+    }
 
     /**
      * Probe every file route and report which ones answer.
@@ -553,8 +585,8 @@ class GithubClient(private val prefs: Prefs) {
         return listOf(preferred) + all.filter { it != preferred }
     }
 
-    private suspend fun get(url: String, timeoutMs: Long? = null): String {
-        Http.execute(request(url), timeoutMs).use { resp ->
+    private suspend fun get(url: String, timeoutMs: Long? = null, noCache: Boolean = false): String {
+        Http.execute(request(url, noCache = noCache), timeoutMs).use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 val msg = runCatching {

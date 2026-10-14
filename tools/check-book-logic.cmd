@@ -1,7 +1,7 @@
 @echo off
 REM ---------------------------------------------------------------------------
 REM  Verify the pure-JVM book logic: encoding detection, chapter splitting, page
-REM  bookkeeping and the shelf's labels.
+REM  bookkeeping, the online-reading cache and the shelf's labels.
 REM
 REM  These decide whether an imported txt shows real Chinese or a page of
 REM  mojibake, how long a book spends on "正在排版", and -- via PageCursor -- whether
@@ -23,6 +23,7 @@ set "TC=E:\deepseekworkspace\androidtools"
 set "JDK=%TC%\jdk\jdk-17.0.20.1+1"
 set "SRC=%ROOT%\app-project\app\src\main\java\com\readon\reader\data"
 set "SRC_READER=%ROOT%\app-project\app\src\main\java\com\readon\reader\reader"
+set "SRC_UPDATE=%ROOT%\app-project\app\src\main\java\com\readon\reader\update"
 set "CACHE=%TC%\gradle-home\caches\modules-2\files-2.1"
 
 if not exist "%JDK%\bin\java.exe" (
@@ -63,7 +64,7 @@ REM The compiler needs its own dependencies on the classpath; the code under tes
 REM only needs the stdlib.
 set "COMPILER_CP=%KOTLIN_HOME%;%STDLIB%;%TROVE%;%ANNOT%;%SCRIPT_RT%"
 
-echo [info] compiling the app's TextCodec, Chapters, PageCursor and ShelfLabels...
+echo [info] compiling the app's TextCodec, Chapters, PageCursor, TextFlow, ReaderInk, Bookmarks, OnlineCachePolicy, UpdateDecision and ShelfLabels...
 REM -no-stdlib/-no-reflect: the compiler is run from a bare jar rather than a Kotlin
 REM distribution, so it must not go looking for a "Kotlin home" it does not have.
 REM The stdlib is supplied explicitly through -cp instead.
@@ -72,11 +73,16 @@ REM PageCursor.kt is compiled from the app tree rather than reproduced here: the
 REM crash it fixes (an empty page list asked for its last entry) is only caught by
 REM exercising the real code, and Model.kt/ShelfLabels.kt are what the shelf
 REM renders. Kotlin only needs the files it is handed, so the Android imports in
-REM the surrounding classes never come into it.
+REM the surrounding classes never come into it -- which is also why TextFlow.kt,
+REM ReaderInk.kt, Bookmarks.kt, OnlineCachePolicy.kt and UpdateDecision.kt are kept
+REM free of Android and Compose types.
 "%JDK%\bin\java.exe" -cp "%COMPILER_CP%" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler ^
   -no-stdlib -no-reflect -nowarn -cp "%STDLIB%" -d "%OUT%" ^
   "%SRC%\TextCodec.kt" "%SRC%\Chapters.kt" "%SRC%\Model.kt" "%SRC%\ShelfLabels.kt" ^
-  "%SRC_READER%\PageCursor.kt" "%ROOT%\tools\codec-check\CodecCheck.kt"
+  "%SRC%\ReaderInk.kt" "%SRC%\Bookmarks.kt" "%SRC%\OnlineCachePolicy.kt" ^
+  "%SRC_READER%\PageCursor.kt" "%SRC_READER%\TextFlow.kt" ^
+  "%SRC_UPDATE%\UpdateDecision.kt" ^
+  "%ROOT%\tools\codec-check\CodecCheck.kt"
 
 if errorlevel 1 (
   echo [FAIL] compilation failed 1>&2

@@ -10,7 +10,8 @@ REM    * do versionName, versionCode and dist/update.json agree
 REM    * is there a CHANGELOG section for the version being shipped
 REM    * is signing material excluded from git, and the wrapper jar included
 REM    * do the book's encoding detection, chapter splitting, pagination and
-REM      shelf labels still behave
+REM      shelf labels still behave, and do the reader's blank-page skip, scrolling
+REM      blocks, colour contrast, bookmarks and online-reading cache
 REM    * do dist/update.json and the staged APK agree
 REM
 REM  Usage:
@@ -47,7 +48,7 @@ if errorlevel 1 goto :failed
 REM The book logic is pure Kotlin with no Android dependencies, so it can be
 REM verified on the desktop.
 echo.
-echo [info] checking book logic ^(encoding, chapters, pagination, shelf labels^)...
+echo [info] checking book logic ^(encoding, chapters, pagination, blank pages, scrolling, colours, bookmarks, online cache, shelf labels^)...
 call "%ROOT%tools\check-book-logic.cmd"
 if errorlevel 1 goto :failed
 

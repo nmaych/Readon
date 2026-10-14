@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.readon.reader.data.Book
 import com.readon.reader.data.BookContent
+import com.readon.reader.data.Bookmark
 import com.readon.reader.data.Chapters
 
 /**
@@ -59,15 +60,43 @@ class ReaderState {
     /** Whether the table of contents drawer is open. */
     var tocVisible: Boolean by mutableStateOf(false)
 
+    /** Whether the bookmark list is open. */
+    var bookmarksVisible: Boolean by mutableStateOf(false)
+
     /**
-     * A search hit waiting to be scrolled to.
+     * Whether the quick options panel (font, colour, reading mode) is open.
      *
-     * It is deferred because jumping to a hit usually means switching chapter,
-     * and the page that contains the hit cannot be computed until the new
-     * chapter has been paginated. The reader applies this as soon as the
-     * matching paginator exists.
+     * It lives in the reader rather than only in Settings because these are the
+     * adjustments a reader makes *while* reading -- "this page is too bright",
+     * "this typeface is hard to scan" -- and sending them to another tab to do it
+     * loses their place.
      */
-    var pendingSearchOffset: Int? by mutableStateOf(null)
+    var optionsVisible: Boolean by mutableStateOf(false)
+
+    /** The book's bookmarks, newest first. Owned by the screen's loader. */
+    var bookmarks: List<Bookmark> by mutableStateOf(emptyList())
+
+    /**
+     * An offset waiting to be scrolled to.
+     *
+     * It is deferred because jumping to a search hit, a table-of-contents entry
+     * or a bookmark usually means switching chapter, and the position cannot be
+     * resolved until the new chapter has been laid out. The reader applies this
+     * as soon as it can.
+     */
+    var pendingJumpOffset: Int? by mutableStateOf(null)
+
+    /**
+     * The saved position to restore, consumed once.
+     *
+     * Held here rather than read from [Book.charOffset] at every layout, because
+     * that value is the position the book was *opened* at and never changes
+     * while reading. Consulting it whenever a chapter is laid out meant that
+     * navigating to a chapter the reader had previously been in jumped to that
+     * old spot instead of the start of the chapter. It is nulled the moment it
+     * is applied, and cleared by any explicit navigation.
+     */
+    var restoreOffset: Int? by mutableStateOf(null)
 
     /**
      * Character offset of the reader's current page, kept up to date by the
@@ -86,11 +115,15 @@ class ReaderState {
         stage = "正在打开…"
         chapterIndex = book.chapterIndex
         pageInChapter = 0
+        restoreOffset = book.charOffset.takeIf { it > 0 }
+        pendingJumpOffset = null
         searchQuery = ""
         searchHits = emptyList()
         searchIndex = 0
         searchVisible = false
         tocVisible = false
+        bookmarksVisible = false
+        optionsVisible = false
         chromeVisible = true
     }
 

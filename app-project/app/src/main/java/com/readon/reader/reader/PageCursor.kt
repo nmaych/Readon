@@ -29,12 +29,30 @@ data class PageSlice(val start: Int, val end: Int)
  * `tools/check-book-logic.cmd` compile this exact file and exercise it on the
  * desktop, where a page-cursor bug is caught instead of shipped.
  *
+ * ## Why pages skip whitespace
+ *
+ * Chapters in a plain-text book routinely end in a run of blank lines, and a
+ * run of blank lines measures as fitting any viewport -- `"\n\n"` is two empty
+ * lines, which is *short*. Paginating straight through therefore produced pages
+ * containing nothing but newlines: the reader drew an empty screen, and the user
+ * had to tap past one or more of them to reach the next chapter. Every page now
+ * starts at [pageStart] of the previous page's end, which skips leading
+ * whitespace, so a page always begins on a character that can be seen. The
+ * offsets are no longer a strict tiling of the text -- the skipped runs belong to
+ * no page -- which is the point.
+ *
  * @param length number of characters in the chapter.
+ * @param pageStart normalises a raw start offset to the first character that may
+ *   be drawn. Defaults to the identity, which keeps the arithmetic testable in
+ *   isolation; [Paginator] passes a whitespace-skipping function. It comes before
+ *   [pageEnd] so that `pageEnd` is the trailing lambda, which is how every call
+ *   site reads.
  * @param pageEnd computes the end offset of the page that starts at the given
  *   offset. It must return a value greater than the offset it was handed.
  */
 class PageCursor(
     private val length: Int,
+    private val pageStart: (Int) -> Int = { it },
     private val pageEnd: (Int) -> Int,
 ) {
     private val pages = ArrayList<PageSlice>()
@@ -52,6 +70,16 @@ class PageCursor(
             complete = true
         } else {
             ensurePage(0)
+            // A chapter that is nothing but whitespace (two headings with only
+            // blank lines between them) has no visible character to start a page
+            // on, so the loop above adds nothing. `page()` must still be able to
+            // answer, and it must not be left asking an empty list for its last
+            // entry -- that is the 1.0.2 crash. One empty page is the honest
+            // answer: there is genuinely nothing to show.
+            if (pages.isEmpty()) {
+                pages.add(PageSlice(length, length))
+                complete = true
+            }
         }
     }
 
@@ -61,11 +89,14 @@ class PageCursor(
         var guard = 0
         while (pages.size <= index && !complete) {
             // The first page starts at the top of the chapter; every later page
-            // starts where the previous one ended. `lastOrNull()` rather than
-            // `last()` is the fix: on the very first call the list is empty, and
-            // `last()` throws -- which is what opening a book did.
-            val start = pages.lastOrNull()?.end ?: 0
+            // starts where the previous one ended, past any blank run. `lastOrNull()`
+            // rather than `last()` is the 1.0.2 fix: on the very first call the
+            // list is empty, and `last()` throws -- which is what opening a book
+            // did.
+            val raw = pages.lastOrNull()?.end ?: 0
+            val start = pageStart(raw)
             if (start >= length) {
+                // Only whitespace is left; there is no page to add.
                 complete = true
                 break
             }
@@ -91,6 +122,9 @@ class PageCursor(
     fun page(index: Int): PageSlice {
         if (index < 0) return PageSlice(0, 0)
         ensurePage(index)
+        // `pages` is never empty after construction, so this cannot throw; the
+        // last page is returned for an index past the end so a stale position
+        // clamped by the reader still resolves to something drawable.
         return pages.getOrElse(index) { pages.last() }
     }
 

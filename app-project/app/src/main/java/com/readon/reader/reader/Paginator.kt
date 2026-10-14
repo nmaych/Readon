@@ -156,9 +156,14 @@ class Paginator(
     private val width: Int,
     private val height: Int,
 ) {
-    private val cursor = PageCursor(text.length) { start ->
-        paginator.pageEnd(text, start, width, height, style)
-    }
+    private val cursor = PageCursor(
+        length = text.length,
+        // Every page begins on a visible character. Without this, the blank run
+        // a chapter ends with became a page of its own and the reader drew an
+        // empty screen; see [PageCursor].
+        pageStart = { raw -> TextFlow.skipBlank(text, raw) },
+        pageEnd = { start -> paginator.pageEnd(text, start, width, height, style) },
+    )
 
     val pageCount: Int get() = cursor.pageCount
     val isComplete: Boolean get() = cursor.isComplete
@@ -174,7 +179,11 @@ class Paginator(
     fun textOf(index: Int): String {
         val p = page(index)
         if (p.start >= p.end || p.start >= text.length) return ""
-        return text.subSequence(p.start, p.end).toString()
+        // Trailing whitespace is not drawn, so it is trimmed here rather than
+        // being handed to the text layout as a run of empty lines.
+        val end = TextFlow.trimEnd(text, p.start, p.end)
+        if (end <= p.start) return ""
+        return text.subSequence(p.start, end).toString()
     }
 
     /** Keep a page's top visible; used to reflow after a viewport change. */

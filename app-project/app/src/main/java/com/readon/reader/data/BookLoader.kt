@@ -60,6 +60,14 @@ class UnsupportedBookException(message: String) : Exception(message)
 class BookLoader(
     private val context: Context,
     private val client: GithubClient,
+    /**
+     * Where a book read online is kept between reads.
+     *
+     * Optional so the loader still works without one; when absent, an online book
+     * is fetched fresh every time, which is what every version before this one
+     * did.
+     */
+    private val cache: OnlineCache? = null,
 ) {
 
     suspend fun load(book: Book, onStage: (String) -> Unit = {}): BookContent =
@@ -103,24 +111,44 @@ class BookLoader(
             return decodeText(book, local, stripMarkup)
         }
 
-        // Online: stream to a cache file, decode from there, then remove it.
+        // Online. A cached copy means this book has been read before on this
+        // device, so the download -- the slow, failure-prone part on the networks
+        // this app is built for -- is skipped entirely.
+        val cached = cache?.get(book)
+        if (cached != null) {
+            onStage("正在读取缓存…")
+            return decodeText(book, cached, stripMarkup)
+        }
+
         onStage("正在连接线路…")
-        val temp = File(context.cacheDir, "readon-online").apply { mkdirs() }
+        // Download into the cache's own staging file when there is a cache, so a
+        // successful read costs one rename rather than a second copy of a file
+        // that can be 75 MB. Without a cache this is a plain scratch file.
+        val target = cache
+        val staging = target?.partFileFor(book) ?: File(context.cacheDir, "readon-online")
+            .apply { mkdirs() }
             .let { File(it, "online-${book.id.hashCode()}.${book.format}") }
         try {
             onStage("正在下载…")
             client.downloadTo(
                 source = book.source,
                 path = book.path,
-                target = temp,
+                target = staging,
                 expectedSize = book.size,
                 onProgress = { p -> onStage("正在下载… ${(p * 100).toInt()}%") },
                 onStage = onStage,
             )
             onStage("正在排版…")
-            return decodeText(book, temp, stripMarkup)
+            val content = decodeText(book, staging, stripMarkup)
+            // Promote to the cache only after the decode succeeded: a file that
+            // cannot be decoded is not worth caching, and caching it would make
+            // the failure permanent instead of a retry away.
+            if (target != null) runCatching { target.commit(book, staging) }
+            return content
         } finally {
-            runCatching { temp.delete() }
+            // After a successful commit the staging file has been renamed away, so
+            // this only removes the remains of a failed read.
+            runCatching { if (staging.exists()) staging.delete() }
         }
     }
 
@@ -155,13 +183,26 @@ class BookLoader(
             onStage("正在排版…")
             local.readBytes()
         } else {
-            onStage("正在连接线路…")
-            client.fetchBytes(
-                source = book.source,
-                path = book.path,
-                limit = GithubClient.MAX_TEXT_BYTES,
-                onStage = onStage,
-            )
+            // The same cache as the text formats, so a re-read of an online EPUB
+            // does not fetch the zip again.
+            val cached = cache?.get(book)
+            if (cached != null) {
+                onStage("正在读取缓存…")
+                cached.readBytes()
+            } else {
+                onStage("正在连接线路…")
+                client.fetchBytes(
+                    source = book.source,
+                    path = book.path,
+                    limit = GithubClient.MAX_TEXT_BYTES,
+                    onStage = onStage,
+                ).also { fetched ->
+                    // Write the bytes through the cache so the next read is local.
+                    // Best effort: a cache that cannot be written must not stop the
+                    // book from opening.
+                    runCatching { cache?.store(book, fetched) }
+                }
+            }
         }
         onStage("正在排版…")
 

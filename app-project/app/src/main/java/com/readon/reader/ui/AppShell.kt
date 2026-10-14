@@ -2,6 +2,7 @@ package com.readon.reader.ui
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,10 +17,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Explore
-import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Explore
-import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -64,7 +65,7 @@ private enum class Tab(
     val icon: ImageVector,
 ) {
     Home("主页", Icons.Filled.Explore, Icons.Outlined.Explore),
-    Shelf("书架", Icons.Filled.MenuBook, Icons.Outlined.MenuBook),
+    Shelf("书架", Icons.AutoMirrored.Filled.MenuBook, Icons.AutoMirrored.Outlined.MenuBook),
     Settings("设置", Icons.Filled.Settings, Icons.Outlined.Settings),
 }
 
@@ -100,6 +101,22 @@ fun AppShell(app: ReadonApp) {
             snackbar.showSnackbar(msg)
         }
     }
+
+    /**
+     * The system back key for the tab level.
+     *
+     * The reader registers its own handler and is composed on top of this one, so
+     * while a book is open back never reaches here. When no book is open, back
+     * first returns to 主页 from another tab -- the three tabs are one screen's
+     * worth of navigation, and dropping the user out of the app from 设置 loses
+     * their place for no reason -- and only then leaves the app, which is what a
+     * back press with nothing left to close is supposed to do.
+     *
+     * Disabled outright while a book is open rather than relying on the reader's
+     * handler being registered later: which callback the dispatcher picks is not
+     * something this screen should have to reason about.
+     */
+    BackHandler(enabled = tab != 0 && openBook == null) { tab = 0 }
 
     Box(Modifier.fillMaxSize()) {
         Scaffold(

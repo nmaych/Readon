@@ -39,6 +39,16 @@ class UpdateCenter(
         data class UpToDate(val latest: String?) : State
         data class Available(val info: UpdateResult.Available) : State
         data class Failed(val message: String) : State
+
+        /**
+         * A newer version exists but cannot be installed from here.
+         *
+         * Kept apart from [Failed] because the card must not label it "检查失败":
+         * the check *succeeded* and found something. The user needs a different
+         * action (download it themselves), not a retry.
+         */
+        data class NewerNotInstallable(val message: String) : State
+
         data class Downloading(val progress: Float) : State
         data class ReadyToInstall(val info: UpdateResult.Available, val file: File) : State
     }
@@ -84,7 +94,9 @@ class UpdateCenter(
                         if (result.versionCode == prefs.ignoredVersionCode) State.Idle
                         else State.Available(result)
                     is UpdateResult.UpToDate -> State.UpToDate(result.latestName)
-                    is UpdateResult.Failed -> State.Failed(result.message)
+                    is UpdateResult.Failed ->
+                        if (result.newerExists) State.NewerNotInstallable(result.message)
+                        else State.Failed(result.message)
                 }
                 checkedThisProcess = true
                 // Record the timestamp only when the check actually completed. A

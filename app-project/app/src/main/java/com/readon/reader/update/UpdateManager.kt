@@ -11,50 +11,46 @@ import com.readon.reader.data.Prefs
 import com.readon.reader.net.GithubClient
 import com.readon.reader.net.Http
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import java.io.File
 import java.security.MessageDigest
 
-/** What an update check found. */
-sealed interface UpdateResult {
-    /** A newer build is available. */
-    data class Available(
-        val versionName: String,
-        val versionCode: Int,
-        val apkUrl: String,
-        val sha256: String?,
-        val notes: String,
-        val mandatory: Boolean,
-    ) : UpdateResult
-
-    /** The installed build is current. */
-    data class UpToDate(val latestName: String?) : UpdateResult
-
-    /** The check could not run. */
-    data class Failed(val message: String) : UpdateResult
-}
-
 /**
  * Finds and installs new versions from GitHub.
  *
- * Two sources, tried in order:
+ * Two sources, both consulted on every check:
  *
  *   1. A manifest at `dist/update.json` in the configured update repository.
- *      This is the primary path: it is a small static file, it carries the
- *      release notes and the APK's SHA-256, and reading it does not consume the
- *      GitHub API rate limit.
- *   2. The GitHub releases API, as a fallback for a repository that publishes
- *      releases but has not added the manifest.
+ *      It is a small static file, it carries the release notes and the APK's
+ *      SHA-256, and reading it does not consume the GitHub API rate limit.
+ *   2. The GitHub releases API.
+ *
+ * ## Why both are always asked
+ *
+ * The manifest used to be authoritative: a manifest that said "no update" ended
+ * the check, and the releases API was consulted only when the manifest could not
+ * be read at all. That made a *stale* manifest indistinguishable from "you are
+ * up to date" -- and stale is the normal failure, not a rare one. The manifest
+ * lives on the default branch and is written by the release workflow, so a
+ * release published by hand, or a run where the manifest commit did not land,
+ * leaves it describing the previous version. The app then said 已是最新版本 while
+ * a newer release sat on the releases page. That is the reported bug.
+ *
+ * Both sources are therefore asked and the newer answer wins; see
+ * [UpdateDecision.reconcile], which is where that rule lives and where it is
+ * tested. Two small JSON requests instead of one is a fair price for not lying to
+ * the user.
  *
  * The version comparison is always on `versionCode`, never on the version name:
  * string comparison puts "1.10.0" before "1.9.0", which would silently stop
  * offering updates at exactly the wrong moment.
  *
  * Both lookups go through [GithubClient.fetchRaw], so they inherit the same
- * mirror racing as everything else. That matters: `raw.githubusercontent.com` is
- * blocked on the same networks that block the books, and an update check that
- * cannot reach its manifest is indistinguishable from "no update available".
+ * mirror racing as everything else, and they are sent with `no-cache` so a
+ * proxy's cached copy of the manifest cannot hide a release either.
  */
 class UpdateManager(
     private val context: Context,
@@ -64,7 +60,8 @@ class UpdateManager(
 
     suspend fun check(): UpdateResult = withContext(Dispatchers.IO) {
         // An explicit manifest URL wins, so a fork or a self-hosted mirror works
-        // without touching the app.
+        // without touching the app. A hand-configured URL is a deliberate choice,
+        // and it is the only source such a setup has.
         val explicit = prefs.updateManifestUrl
         if (explicit.isNotBlank()) {
             return@withContext checkManifest(explicit)
@@ -75,18 +72,18 @@ class UpdateManager(
         val manifestUrl =
             "https://raw.githubusercontent.com/$owner/$repo/main/dist/update.json"
 
-        val fromManifest = checkManifest(manifestUrl)
-        // A missing manifest is expected on a repository that only uses releases.
-        if (fromManifest is UpdateResult.Available) return@withContext fromManifest
-        if (fromManifest is UpdateResult.UpToDate) return@withContext fromManifest
-
-        val fromReleases = checkReleases(owner, repo)
-        if (fromReleases is UpdateResult.Failed && fromManifest is UpdateResult.Failed) {
-            // Prefer the manifest's message: it explains the common case, which is
-            // that the repository has no dist/update.json yet.
-            return@withContext fromManifest
+        // Both sources are asked, concurrently, and the newer answer wins.
+        //
+        // The manifest alone was authoritative here, which is exactly what made
+        // the app claim 已是最新版本 while a newer release existed: a manifest left
+        // behind at the previous version reports "up to date" in perfect health,
+        // so it cannot be told apart from the truth. Asking the releases API too
+        // costs one extra small request and removes the failure mode entirely.
+        coroutineScope {
+            val manifest = async { checkManifest(manifestUrl) }
+            val releases = async { checkReleases(owner, repo) }
+            UpdateDecision.reconcile(manifest.await(), releases.await())
         }
-        fromReleases
     }
 
     /**
@@ -99,15 +96,26 @@ class UpdateManager(
      */
     private suspend fun checkManifest(url: String): UpdateResult {
         return try {
-            val body = client.fetchRaw(url, CHECK_TIMEOUT_MS)
+            // `noCache` because the proxies in front of raw.githubusercontent.com
+            // happily serve a stale copy of this file. A cached manifest is
+            // another way to be told "已是最新版本" while a release is out.
+            val body = client.fetchRaw(url, CHECK_TIMEOUT_MS, noCache = true)
             val obj = JsonParser.parseString(body).asJsonObject
             val code = obj.get("versionCode")?.asInt
                 ?: return UpdateResult.Failed("清单缺少 versionCode")
             val name = obj.get("versionName")?.asString ?: code.toString()
             val apk = obj.get("apkUrl")?.asString
-                ?: return UpdateResult.Failed("清单缺少 apkUrl")
 
             if (code > BuildConfig.VERSION_CODE) {
+                // A newer version with no download URL is not something to
+                // install, but it is emphatically not "up to date" either --
+                // saying so is the bug this whole class is about.
+                if (apk.isNullOrBlank()) {
+                    return UpdateResult.Failed(
+                        "发现新版本 $name，但清单里没有下载地址。请稍后重试，或到 GitHub 下载。",
+                        newerExists = true,
+                    )
+                }
                 UpdateResult.Available(
                     versionName = name,
                     versionCode = code,
@@ -131,6 +139,7 @@ class UpdateManager(
             val body = client.fetchRaw(
                 "https://api.github.com/repos/$owner/$repo/releases/latest",
                 CHECK_TIMEOUT_MS,
+                noCache = true,
             )
             val obj = JsonParser.parseString(body).asJsonObject
             if (obj.has("message") && !obj.has("tag_name")) {
@@ -141,14 +150,19 @@ class UpdateManager(
             // A release tag is `v1.2.3`; without a manifest there is no
             // versionCode, so it is derived from the tag using the same scheme as
             // the build itself.
-            val code = versionCodeOf(name)
+            val code = UpdateDecision.versionCodeOf(name)
             val apk = obj.getAsJsonArray("assets")
                 ?.map { it.asJsonObject }
                 ?.firstOrNull { it.get("name")?.asString?.endsWith(".apk") == true }
                 ?.get("browser_download_url")?.asString
-                ?: return UpdateResult.Failed("该版本没有附带 APK")
 
             if (code > BuildConfig.VERSION_CODE) {
+                if (apk.isNullOrBlank()) {
+                    return UpdateResult.Failed(
+                        "发现新版本 $name，但这个 release 没有附带 APK。请到 GitHub 手动下载。",
+                        newerExists = true,
+                    )
+                }
                 UpdateResult.Available(
                     versionName = name,
                     versionCode = code,
@@ -289,17 +303,6 @@ class UpdateManager(
     }
 
     companion object {
-        /** `1.2.3` -> `10203`, matching the build's version scheme. */
-        fun versionCodeOf(versionName: String): Int {
-            val parts = versionName.trim().split('.', '-', '+')
-            val nums = parts.mapNotNull { it.takeWhile(Char::isDigit).toIntOrNull() }
-            if (nums.isEmpty()) return 0
-            val major = nums.getOrElse(0) { 0 }
-            val minor = nums.getOrElse(1) { 0 }
-            val patch = nums.getOrElse(2) { 0 }
-            return major * 10000 + minor * 100 + patch
-        }
-
         /**
          * Whole-call ceiling for a check.
          *

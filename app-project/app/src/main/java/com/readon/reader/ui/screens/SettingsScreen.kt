@@ -1,6 +1,11 @@
 package com.readon.reader.ui.screens
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,17 +20,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Source
 import androidx.compose.material.icons.filled.TextFields
@@ -33,7 +42,7 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -58,7 +67,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -68,10 +79,14 @@ import com.readon.reader.BuildConfig
 import com.readon.reader.ReadonApp
 import com.readon.reader.data.Prefs
 import com.readon.reader.data.LibrarySource
+import com.readon.reader.data.ReaderInk
+import com.readon.reader.data.ReadingMode
 import com.readon.reader.data.formatSize
 import com.readon.reader.net.ListSource
 import com.readon.reader.net.Mirror
 import com.readon.reader.ui.collectAsStateSafe
+import com.readon.reader.ui.theme.ReaderFont
+import com.readon.reader.ui.theme.ReaderPalette
 import com.readon.reader.ui.theme.ReaderTheme
 import com.readon.reader.update.UpdateCenter
 import com.readon.reader.update.UpdateResult
@@ -93,6 +108,7 @@ fun SettingsScreen(
     toast: (String) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val prefs = app.prefs
     val revision by prefs.revision.collectAsStateSafe()
     val snapshot = remember(revision) { SettingsSnapshot.of(prefs) }
@@ -102,6 +118,8 @@ fun SettingsScreen(
     var showAbout by remember { mutableStateOf(false) }
 
     var cachedBytes by remember { mutableStateOf(0L) }
+    var onlineCacheBytes by remember { mutableStateOf(0L) }
+    var onlineCacheCount by remember { mutableStateOf(0) }
     var probeState by remember { mutableStateOf<ProbeState>(ProbeState.Idle) }
 
     // The update check lives at application scope: a check started here used to be
@@ -111,6 +129,16 @@ fun SettingsScreen(
 
     LaunchedEffect(revision) {
         cachedBytes = app.store.usedBytes()
+    }
+
+    // The online-reading cache is accounted separately from the shelf, and shown
+    // separately: the two are different promises. One is "books you kept", the
+    // other is "books you happened to read over the network". `cacheTick` lets the
+    // clear button refresh these numbers without waiting for a settings change.
+    var cacheTick by remember { mutableStateOf(0) }
+    LaunchedEffect(revision, cacheTick) {
+        onlineCacheBytes = app.onlineCache.usedBytes()
+        onlineCacheCount = app.onlineCache.count()
     }
 
     // Ask once per appearance; the centre itself decides whether a check is due.
@@ -161,12 +189,55 @@ fun SettingsScreen(
                     },
                     onInstall = { _, file -> app.updates.install(file) },
                     onIgnore = { available -> app.updateCenter.ignore(available) },
+                    onOpenReleases = { openUrl(context, ReadonLinks.RELEASES, toast) },
                 )
             }
 
             // --- reading ----------------------------------------------------
             item {
-                SectionCard(title = "阅读", icon = Icons.Filled.MenuBook) {
+                SectionCard(title = "阅读", icon = Icons.AutoMirrored.Filled.MenuBook) {
+                    Text(
+                        "阅读方式",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ReadingMode.entries.forEach { option ->
+                            ThemeModeChip(option.label, snapshot.readingMode == option) {
+                                prefs.readingMode = option
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (snapshot.readingMode == ReadingMode.Scroll) {
+                            "上下拖动连续阅读，适合长篇；位置与翻页模式互通。"
+                        } else {
+                            "左右点击翻页，每页有明确边界。"
+                        },
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    HorizontalDivider(Modifier.padding(vertical = 10.dp))
+
+                    Text(
+                        "字体",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    FlowRowOf(
+                        options = ReaderFont.entries.map { it.label to it.name },
+                        selected = snapshot.readerFont.name,
+                        onSelect = { name ->
+                            ReaderFont.fromName(name)?.let { prefs.readerFont = it }
+                        },
+                    )
+
+                    HorizontalDivider(Modifier.padding(vertical = 10.dp))
+
                     SettingRow(
                         title = "阅读主题",
                         subtitle = snapshot.readerTheme.label,
@@ -176,13 +247,56 @@ fun SettingsScreen(
                                 ThemeSwatch(
                                     theme = theme,
                                     selected = theme == snapshot.readerTheme,
-                                    onClick = { prefs.readerTheme = theme },
+                                    onClick = {
+                                        // A preset means "be this preset", so it
+                                        // clears any hand-picked colour; otherwise
+                                        // the swatch would appear to do nothing.
+                                        prefs.readerTheme = theme
+                                        prefs.readerBackgroundColor = ReaderInk.NONE
+                                        prefs.readerTextColor = ReaderInk.NONE
+                                    },
                                 )
                             }
                         }
                     }
 
-                    Divider(Modifier.padding(vertical = 10.dp))
+                    HorizontalDivider(Modifier.padding(vertical = 10.dp))
+
+                    Text(
+                        "页面颜色",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    ColorChoices(
+                        colors = ReaderPalette.backgrounds,
+                        selected = snapshot.readerBackgroundColor,
+                        onPick = { prefs.readerBackgroundColor = it },
+                        onClear = { prefs.readerBackgroundColor = ReaderInk.NONE },
+                    )
+
+                    Spacer(Modifier.height(14.dp))
+
+                    Text(
+                        "文字颜色",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    ColorChoices(
+                        colors = ReaderPalette.texts,
+                        selected = snapshot.readerTextColor,
+                        onPick = { prefs.readerTextColor = it },
+                        onClear = { prefs.readerTextColor = ReaderInk.NONE },
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "自定义颜色会覆盖主题；「跟随主题」用回主题自身的配色。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    HorizontalDivider(Modifier.padding(vertical = 10.dp))
 
                     SettingRow(
                         title = "字号",
@@ -198,7 +312,7 @@ fun SettingsScreen(
                         )
                     }
 
-                    Divider(Modifier.padding(vertical = 10.dp))
+                    HorizontalDivider(Modifier.padding(vertical = 10.dp))
 
                     SettingRow(
                         title = "行距",
@@ -213,14 +327,7 @@ fun SettingsScreen(
                         )
                     }
 
-                    Divider(Modifier.padding(vertical = 10.dp))
-
-                    SwitchRow(
-                        title = "衬线字体",
-                        subtitle = "开启后使用宋体风格，适合长文阅读",
-                        checked = snapshot.serif,
-                        onCheckedChange = { prefs.serif = it },
-                    )
+                    HorizontalDivider(Modifier.padding(vertical = 10.dp))
 
                     SwitchRow(
                         title = "阅读时保持屏幕常亮",
@@ -436,6 +543,50 @@ fun SettingsScreen(
                         Spacer(Modifier.width(6.dp))
                         Text("清空已下载的书")
                     }
+
+                    HorizontalDivider(Modifier.padding(vertical = 14.dp))
+
+                    // The online-reading cache, deliberately its own block: it
+                    // holds books that were *read* over the network, not books the
+                    // user chose to keep, and clearing it costs nothing but the
+                    // bandwidth of the next read. Mixing the two into one number
+                    // would make the shelf's "clear" button look like it was
+                    // deleting more than the user asked for.
+                    Text(
+                        "在线阅读缓存",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "在线阅读过的书会留一份在设备上，再次打开就不用重新下载。" +
+                            "它和书架互不影响，随时可以清掉。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    InfoLine(
+                        "缓存占用",
+                        if (onlineCacheCount == 0) "无" 
+                        else "${formatSize(onlineCacheBytes)} · $onlineCacheCount 本",
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                app.onlineCache.clear()
+                                onlineCacheBytes = 0
+                                onlineCacheCount = 0
+                                cacheTick++
+                                toast("已清空在线阅读缓存")
+                            }
+                        },
+                        enabled = onlineCacheCount > 0,
+                    ) {
+                        Icon(Icons.Filled.CleaningServices, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("清理在线阅读缓存")
+                    }
                 }
             }
 
@@ -447,7 +598,7 @@ fun SettingsScreen(
                         checked = snapshot.autoCheckUpdates,
                         onCheckedChange = { prefs.autoCheckUpdates = it },
                     )
-                    Divider(Modifier.padding(vertical = 10.dp))
+                    HorizontalDivider(Modifier.padding(vertical = 10.dp))
                     InfoLine("更新仓库", "${snapshot.updateOwner}/${snapshot.updateRepo}")
                     if (snapshot.lastUpdateCheck > 0) {
                         InfoLine("上次检查", formatTime(snapshot.lastUpdateCheck))
@@ -466,10 +617,55 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            // --- links ------------------------------------------------------
+            item {
+                SectionCard(title = "链接", icon = Icons.Filled.Link) {
+                    Text(
+                        "点一下直接在浏览器里打开。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    LinkRow(
+                        label = "项目主页",
+                        value = ReadonLinks.REPO,
+                        onOpen = { openUrl(context, ReadonLinks.REPO_URL, toast) },
+                    )
+                    LinkRow(
+                        label = "全部版本",
+                        value = ReadonLinks.RELEASES,
+                        onOpen = { openUrl(context, ReadonLinks.RELEASES, toast) },
+                    )
+                    LinkRow(
+                        label = "问题反馈",
+                        value = ReadonLinks.ISSUES,
+                        onOpen = { openUrl(context, ReadonLinks.ISSUES, toast) },
+                    )
+                    LinkRow(
+                        label = "默认书库",
+                        value = ReadonLinks.BOOK_LIBRARY,
+                        onOpen = { openUrl(context, ReadonLinks.BOOK_LIBRARY, toast) },
+                    )
+                }
+            }
         }
     }
 
     // --- dialogs -----------------------------------------------------------
+
+    // Back closes whatever dialog is open rather than leaving the app. The
+    // dialogs are `AlertDialog`s, which handle the back key themselves while
+    // focused, but this covers the case where one is open and focus has moved on
+    // -- and it makes "back always closes the topmost thing" true everywhere
+    // rather than almost everywhere.
+    BackHandler(enabled = showLibraryEditor || showClearConfirm || showAbout) {
+        when {
+            showAbout -> showAbout = false
+            showClearConfirm -> showClearConfirm = false
+            showLibraryEditor -> showLibraryEditor = false
+        }
+    }
 
     if (showLibraryEditor) {
         LibraryEditorDialog(
@@ -498,6 +694,7 @@ fun SettingsScreen(
                 TextButton(onClick = {
                     scope.launch {
                         app.store.clearAll()
+                        app.bookmarks.clearAll()
                         cachedBytes = 0
                         showClearConfirm = false
                         toast("已清空")
@@ -547,6 +744,42 @@ private sealed interface ProbeState {
 }
 
 /**
+ * The project's own addresses, in one place.
+ *
+ * Hard-coded rather than derived from the configured library or update repository:
+ * those are user-editable, and "问题反馈" pointing at whatever repository the user
+ * happens to be reading books from would send bug reports nowhere useful. The
+ * update repository is a *setting*; this is the app's identity.
+ */
+private object ReadonLinks {
+    private const val OWNER = "nmaych"
+    private const val REPO_NAME = "Readon"
+
+    const val REPO_URL = "https://github.com/$OWNER/$REPO_NAME"
+    const val RELEASES = "$REPO_URL/releases"
+    const val ISSUES = "$REPO_URL/issues"
+    const val BOOK_LIBRARY = "https://github.com/$OWNER/ReadonBooklibrary"
+
+    /** What is shown as the link's text, without the scheme. */
+    const val REPO = "github.com/$OWNER/$REPO_NAME"
+}
+
+/**
+ * Open [url] in whatever the device uses for web pages.
+ *
+ * Every failure is reported rather than swallowed: on a device with no browser --
+ * or with the one browser disabled -- `startActivity` throws, and a link that
+ * silently does nothing reads as a broken app. The URL is offered as text so the
+ * user can still get to it by hand.
+ */
+private fun openUrl(context: Context, url: String, toast: (String) -> Unit) {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val opened = runCatching { context.startActivity(intent) }.isSuccess
+    if (!opened) toast("没有可用的浏览器。地址：$url")
+}
+
+/**
  * A chip row that wraps onto multiple lines.
  *
  * `FlowRow` is not in the Compose version this project builds against, and the
@@ -573,7 +806,6 @@ private fun FlowRowOf(
 }
 
 /** Update flow states the card renders, owned by the app-scoped update centre. */
-
 /** A snapshot of the settings, read once per revision. */
 private data class SettingsSnapshot(
     val owner: String,
@@ -581,6 +813,10 @@ private data class SettingsSnapshot(
     val branch: String,
     val token: String,
     val readerTheme: ReaderTheme,
+    val readerFont: ReaderFont,
+    val readerTextColor: Int,
+    val readerBackgroundColor: Int,
+    val readingMode: ReadingMode,
     val fontSize: Float,
     val lineSpacing: Float,
     val serif: Boolean,
@@ -610,6 +846,10 @@ private data class SettingsSnapshot(
                 branch = p.branch,
                 token = p.token,
                 readerTheme = p.readerTheme,
+                readerFont = p.readerFont,
+                readerTextColor = p.readerTextColor,
+                readerBackgroundColor = p.readerBackgroundColor,
+                readingMode = p.readingMode,
                 fontSize = p.fontSize,
                 lineSpacing = p.lineSpacing,
                 serif = p.serif,
@@ -639,6 +879,7 @@ private fun UpdateCard(
     onDownload: (UpdateResult.Available) -> Unit,
     onInstall: (UpdateResult.Available, java.io.File) -> Unit,
     onIgnore: (UpdateResult.Available) -> Unit,
+    onOpenReleases: () -> Unit,
 ) {
     val (accent, title, body) = when (state) {
         is UpdateCenter.State.Idle -> Triple(
@@ -655,6 +896,13 @@ private fun UpdateCard(
         )
         is UpdateCenter.State.Failed -> Triple(
             MaterialTheme.colorScheme.error, "检查失败", state.message,
+        )
+        is UpdateCenter.State.NewerNotInstallable -> Triple(
+            // Not the error colour: the check worked and found a release. The
+            // user's next step is to go get it, not to retry.
+            MaterialTheme.colorScheme.tertiary,
+            "发现新版本，但无法在这里安装",
+            state.message,
         )
         is UpdateCenter.State.Available -> Triple(
             MaterialTheme.colorScheme.secondary,
@@ -684,6 +932,8 @@ private fun UpdateCard(
                         is UpdateCenter.State.ReadyToInstall -> Icons.Filled.Download
                         is UpdateCenter.State.UpToDate -> Icons.Filled.Check
                         is UpdateCenter.State.Failed -> Icons.Filled.Info
+                        // A release was found, so it is "download", not "problem".
+                        is UpdateCenter.State.NewerNotInstallable -> Icons.Filled.Download
                         else -> Icons.Filled.CloudSync
                     },
                     contentDescription = null,
@@ -741,6 +991,30 @@ private fun UpdateCard(
                     Spacer(Modifier.height(12.dp))
                     Button(onClick = { onInstall(state.info, state.file) }) {
                         Text("立即安装")
+                    }
+                }
+
+                is UpdateCenter.State.NewerNotInstallable -> {
+                    // The one useful action here is to go and get it, so the card
+                    // offers exactly that instead of a retry that would find the
+                    // same release again.
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { onOpenReleases() }) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.OpenInNew,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("到 GitHub 下载")
+                        }
+                        OutlinedButton(
+                            onClick = onCheck,
+                            enabled = state !is UpdateCenter.State.Checking,
+                        ) {
+                            Text("重新检查")
+                        }
                     }
                 }
 
@@ -887,6 +1161,58 @@ private fun InfoLine(label: String, value: String) {
     }
 }
 
+/**
+ * A row that opens a web page.
+ *
+ * A whole-row click target rather than a small "open" icon: the label, the address
+ * and the icon are all part of the same action, and a tap that lands on the text
+ * of a link and does nothing is the sort of thing that makes an app feel broken.
+ * The address is tinted like a link so it is visibly the tappable thing.
+ */
+@Composable
+private fun LinkRow(
+    label: String,
+    value: String,
+    onOpen: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 8.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Filled.Link,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                label,
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                value,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Icon(
+            Icons.AutoMirrored.Filled.OpenInNew,
+            contentDescription = "在浏览器中打开",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp),
+        )
+    }
+}
+
 @Composable
 private fun ThemeSwatch(theme: ReaderTheme, selected: Boolean, onClick: () -> Unit) {
     Box(
@@ -933,6 +1259,56 @@ private fun ThemeModeChip(label: String, selected: Boolean, onClick: () -> Unit)
             .padding(horizontal = 16.dp, vertical = 7.dp)
     ) {
         Text(label, color = fg, fontSize = 13.sp)
+    }
+}
+
+/**
+ * The reader's text or page colour swatches, with "follow the theme" first.
+ *
+ * The selected swatch carries a check tinted for *itself* rather than for the
+ * page: a white check on a white swatch is invisible, and the swatch is what it
+ * sits on.
+ */
+@Composable
+private fun ColorChoices(
+    colors: List<Int>,
+    selected: Int,
+    onPick: (Int) -> Unit,
+    onClear: () -> Unit,
+) {
+    val following = selected == ReaderInk.NONE
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        ThemeModeChip("跟随主题", following, onClear)
+        colors.chunked(6).forEach { chunk ->
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                chunk.forEach { argb ->
+                    val picked = !following && argb == selected
+                    Box(
+                        Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color(argb))
+                            .border(
+                                width = if (picked) 2.dp else 1.dp,
+                                color = if (picked) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.outlineVariant,
+                                shape = CircleShape,
+                            )
+                            .clickable { onPick(argb) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (picked) {
+                            Icon(
+                                Icons.Filled.Check,
+                                contentDescription = null,
+                                tint = Color(ReaderInk.readableOn(argb)),
+                                modifier = Modifier.size(17.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

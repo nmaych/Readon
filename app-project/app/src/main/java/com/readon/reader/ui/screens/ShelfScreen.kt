@@ -28,8 +28,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Explore
-import androidx.compose.material.icons.filled.MenuBook
-import androidx.compose.material.icons.filled.Sort
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -221,7 +221,7 @@ fun ShelfScreen(
                 }
                 Box {
                     IconButton(onClick = { sortMenu = true }) {
-                        Icon(Icons.Filled.Sort, contentDescription = "排序")
+                        Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "排序")
                     }
                     DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }) {
                         ShelfSort.entries.forEach { option ->
@@ -249,7 +249,7 @@ fun ShelfScreen(
 
         if (loaded && books.isEmpty()) {
             EmptyState(
-                icon = Icons.Filled.MenuBook,
+                icon = Icons.AutoMirrored.Filled.MenuBook,
                 title = "书架是空的",
                 message = "到「主页」下载在线书籍，或从手机里导入已有的 txt / epub 文件。",
                 action = {
@@ -316,6 +316,10 @@ fun ShelfScreen(
                     pendingDelete = null
                     scope.launch {
                         app.store.delete(target.id)
+                        // The bookmarks belong to the book that just went away;
+                        // leaving them behind would grow the file forever and
+                        // resurrect them if the book were re-downloaded.
+                        app.bookmarks.clear(target.id)
                         books = app.store.load()
                         usedBytes = app.store.usedBytes()
                         toast("已删除：${target.title}")
