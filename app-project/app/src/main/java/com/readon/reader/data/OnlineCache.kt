@@ -87,8 +87,11 @@ class OnlineCache(private val context: Context) {
      */
     fun partFileFor(book: Book): File {
         dir.mkdirs()
-        return File(dir, fileFor(book).name + PART_SUFFIX)
+        return File(dir, partNameFor(book))
     }
+
+    /** The `.part` sibling's name, without touching the filesystem. */
+    private fun partNameFor(book: Book): String = fileFor(book).name + PART_SUFFIX
 
     /** Promote a completed [part] file to the cache. Returns the cached file. */
     suspend fun commit(book: Book, part: File): File = withContext(Dispatchers.IO) {
@@ -136,6 +139,22 @@ class OnlineCache(private val context: Context) {
     suspend fun clear(): Unit = withContext(Dispatchers.IO) {
         dir.listFiles()?.forEach { runCatching { it.delete() } }
         runCatching { dir.delete() }
+    }
+
+    /**
+     * Forget [book], and anything left of a partial read of it.
+     *
+     * Called when the book has been downloaded to the shelf: the shelf copy is
+     * the one that will be read from now on, so keeping a second full copy of a
+     * file that can be 75 MB in the cache is pure waste. It is not an error if
+     * there was nothing there -- a book downloaded without ever being read online
+     * has no cache entry at all.
+     */
+    suspend fun remove(book: Book): Unit = withContext(Dispatchers.IO) {
+        runCatching { fileFor(book).delete() }
+        // Not `partFileFor`, which creates the directory: deleting something that
+        // may not exist must not be the reason a cache directory appears.
+        runCatching { File(dir, partNameFor(book)).delete() }
     }
 
     /**

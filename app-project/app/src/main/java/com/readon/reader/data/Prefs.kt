@@ -2,6 +2,7 @@ package com.readon.reader.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.readon.reader.reader.AutoRead
 import com.readon.reader.ui.theme.ReaderFont
 import com.readon.reader.ui.theme.ReaderTheme
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -186,6 +187,31 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(K_KEEP_AWAKE, true)
         set(v) = edit { putBoolean(K_KEEP_AWAKE, v) }
 
+    /**
+     * How long automatic reading stays on one page, in seconds.
+     *
+     * Read through [AutoRead.clampSeconds] rather than used raw: a stored value
+     * of zero would turn pages as fast as the device can, and the point of the
+     * clamp is that a bad value produces a sane pace instead of a runaway. The
+     * clamp is applied on read as well as on write so a value written by an older
+     * or newer version -- or hand-edited -- is still bounded.
+     */
+    var autoReadSeconds: Int
+        get() = AutoRead.clampSeconds(sp.getInt(K_AUTO_READ_SECONDS, AutoRead.DEFAULT_SECONDS))
+        set(v) = edit { putInt(K_AUTO_READ_SECONDS, AutoRead.clampSeconds(v)) }
+
+    /**
+     * Whether a newly opened book starts reading itself.
+     *
+     * Off by default, and off for a book that has not been touched this session
+     * even when it is on: a book that starts turning its own pages the instant it
+     * opens is startling, and the reader may have opened it to check something.
+     * The setting is what the reader's play button does for *the next* book.
+     */
+    var autoReadEnabled: Boolean
+        get() = sp.getBoolean(K_AUTO_READ, false)
+        set(v) = edit { putBoolean(K_AUTO_READ, v) }
+
     /** Follow the system dark theme, or force light/dark. */
     var themeMode: Int
         get() = sp.getInt(K_THEME_MODE, THEME_SYSTEM)
@@ -255,6 +281,8 @@ class Prefs(context: Context) {
         private const val K_PAGE_ANIM = "page_anim"
         private const val K_READING_MODE = "reading_mode"
         private const val K_KEEP_AWAKE = "keep_awake"
+        private const val K_AUTO_READ = "auto_read"
+        private const val K_AUTO_READ_SECONDS = "auto_read_seconds"
         private const val K_THEME_MODE = "theme_mode"
         private const val K_UPD_OWNER = "upd_owner"
         private const val K_UPD_REPO = "upd_repo"

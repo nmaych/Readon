@@ -4,6 +4,7 @@ import com.google.gson.JsonParser
 import com.readon.reader.data.Book
 import com.readon.reader.data.BookFormat
 import com.readon.reader.data.LibrarySource
+import com.readon.reader.data.PartialRead
 import com.readon.reader.data.Prefs
 import com.readon.reader.data.RepoFile
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +25,22 @@ data class LibraryListing(
     val books: List<Book>,
     val truncated: Boolean,
     val via: String,
+)
+
+/**
+ * What one ranged fetch of a book produced.
+ *
+ * @param bytes how many bytes this call appended to the target file.
+ * @param total the file's full size, as the route stated it in `Content-Range` or
+ *   `Content-Length`; 0 when the route did not say.
+ * @param wholeFile true when the route ignored the `Range` header and started
+ *   sending the file from the beginning. Some proxies do this, and the caller
+ *   has to know so it does not append a second copy of the book to the first.
+ */
+data class RangeResult(
+    val bytes: Long,
+    val total: Long,
+    val wholeFile: Boolean,
 )
 
 /**
@@ -75,16 +92,21 @@ data class LibraryListing(
  */
 class GithubClient(private val prefs: Prefs) {
 
-    private fun request(url: String, rangeProbe: Boolean = false, noCache: Boolean = false): Request {
+    /**
+     * @param rangeHeader a `Range` value, e.g. `bytes=0-2047`. Used both by the
+     *   route probe (a 2 KB window) and by the incremental reader, which fetches
+     *   a book in chunks rather than waiting for the whole file.
+     */
+    private fun request(
+        url: String,
+        rangeHeader: String? = null,
+        noCache: Boolean = false,
+    ): Request {
         val b = Request.Builder()
             .url(url)
             .header("User-Agent", Http.USER_AGENT)
             .header("Accept", "application/vnd.github+json")
-        if (rangeProbe) {
-            // Two kilobytes proves a route carries this file, and is small enough
-            // that probing every host costs less than one page of a book.
-            b.header("Range", "bytes=0-2047")
-        }
+        if (rangeHeader != null) b.header("Range", rangeHeader)
         if (noCache) {
             // The GitHub proxies in front of raw.githubusercontent.com cache
             // aggressively, and the update manifest is a file whose whole point is
@@ -180,7 +202,9 @@ class GithubClient(private val prefs: Prefs) {
 
     /** True when a 2 KB range of [url] comes back as plausible file content. */
     private suspend fun probeRange(url: String, timeoutMs: Long = PROBE_MS): Boolean {
-        Http.execute(request(url, rangeProbe = true), timeoutMs).use { resp ->
+        // Two kilobytes proves a route carries this file, and is small enough that
+        // probing every host costs less than one page of a book.
+        Http.execute(request(url, rangeHeader = PROBE_RANGE), timeoutMs).use { resp ->
             if (!resp.isSuccessful) return false
             val body = resp.body ?: return false
             // Several of these proxies answer an unknown path with an HTML error
@@ -423,6 +447,129 @@ class GithubClient(private val prefs: Prefs) {
     }
 
     /**
+     * Fetch a byte range of a book and append it to [target].
+     *
+     * This is what makes online reading start in seconds instead of after a 75 MB
+     * download: the reader asks for a prefix, shows it, and the rest arrives
+     * behind the reader's back. It is also how an interrupted read resumes --
+     * [offset] is however much is already on disk.
+     *
+     * Three answers have to be told apart, because the proxies in front of
+     * `raw.githubusercontent.com` do not all behave:
+     *
+     *  * **206 Partial Content** -- the normal case. `Content-Range` carries the
+     *    file's real size, which is the only way to learn it when the listing did
+     *    not report one.
+     *  * **200 OK** -- the route ignored `Range` and is sending the file from the
+     *    start. The copy is capped at [maxBytes] and the connection is dropped, so
+     *    a proxy that cannot do ranges costs one prefix rather than the whole
+     *    book; the caller is told via [RangeResult.wholeFile] so it rewrites
+     *    rather than appends.
+     *  * **416 Range Not Satisfiable** -- there is nothing at [offset]. That is
+     *    the honest "the file ends here" answer, not an error.
+     *
+     * @param maxBytes most bytes to append. Zero or less means "to the end".
+     * @return how much arrived and what the route said about the total size.
+     */
+    suspend fun fetchRange(
+        source: LibrarySource,
+        path: String,
+        offset: Long,
+        maxBytes: Long,
+        target: File,
+        expectedSize: Long = 0L,
+        onProgress: (Float) -> Unit = {},
+        onStage: (String) -> Unit = {},
+    ): RangeResult = withContext(Dispatchers.IO) {
+        val preferred = pickMirror(source, path, onStage)
+        withMirrors(preferred) { mirror ->
+            streamRange(
+                mirror.rawUrl(source, path, prefs.mirrorPrefix),
+                offset = offset,
+                maxBytes = maxBytes,
+                target = target,
+                expectedSize = expectedSize,
+                onProgress = onProgress,
+            )
+        }
+    }
+
+    private suspend fun streamRange(
+        url: String,
+        offset: Long,
+        maxBytes: Long,
+        target: File,
+        expectedSize: Long,
+        onProgress: (Float) -> Unit,
+    ): RangeResult {
+        target.parentFile?.mkdirs()
+        val range = if (maxBytes > 0L) {
+            "bytes=$offset-${offset + maxBytes - 1}"
+        } else {
+            "bytes=$offset-"
+        }
+
+        Http.execute(request(url, rangeHeader = range), TRANSFER_TIMEOUT_MS).use { resp ->
+            if (resp.code == 416) {
+                // Past the end of the file. `Content-Range: bytes */12345` states
+                // the real size; when it does not, the caller falls back to the
+                // size the listing reported.
+                val total = PartialRead.parseContentRange(resp.header("Content-Range"))?.total ?: 0L
+                return RangeResult(bytes = 0L, total = total, wholeFile = false)
+            }
+            if (!resp.isSuccessful) throw LibraryException(httpMessage(resp.code))
+            val body = resp.body ?: throw LibraryException("下载失败：内容为空")
+
+            val wholeFile = resp.code == 200
+            val contentRange = PartialRead.parseContentRange(resp.header("Content-Range"))
+            val declared = body.contentLength()
+            // A range answer states the file's full size; a whole-file answer
+            // states its own length, which is the same thing.
+            val total = contentRange?.total?.takeIf { it > 0L }
+                ?: declared.takeIf { it > 0L }
+                ?: expectedSize
+
+            // Appending to a file that this response is about to rewrite from the
+            // beginning would interleave two copies of the book. This happens when
+            // a route that cannot do ranges is used to resume, and when a range
+            // request is answered with the whole file.
+            if (wholeFile || offset == 0L) {
+                if (target.exists() && !target.delete()) {
+                    target.writeBytes(ByteArray(0))
+                }
+            }
+
+            var written = 0L
+            var received = 0L
+            body.byteStream().use { input ->
+                java.io.FileOutputStream(target, true).use { out ->
+                    val buf = ByteArray(128 * 1024)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        received += n
+                        // A route that ignored the range is capped here rather
+                        // than after the whole file has crossed the network.
+                        val room = if (maxBytes > 0L) maxBytes - written else Long.MAX_VALUE
+                        if (room <= 0L) break
+                        val take = minOf(n.toLong(), room).toInt()
+                        out.write(buf, 0, take)
+                        written += take
+                        if (total > 0L) onProgress(((offset + written).toFloat() / total).coerceIn(0f, 1f))
+                        if (take < n) break
+                    }
+                }
+            }
+            if (written == 0L) {
+                // A 200 that carried nothing means the file is empty or the route
+                // returned an error page; either way there is no book here.
+                if (received == 0L) throw LibraryException("下载失败：内容为空")
+            }
+            return RangeResult(bytes = written, total = total, wholeFile = wholeFile)
+        }
+    }
+
+    /**
      * Fetch a whole file into memory.
      *
      * Used only for formats that genuinely need random access to the bytes -- EPUB
@@ -637,6 +784,9 @@ class GithubClient(private val prefs: Prefs) {
 
         /** Small documents (update manifest, release JSON). */
         private const val RAW_TIMEOUT_MS = 20_000L
+
+        /** The window a route probe asks for. */
+        private const val PROBE_RANGE = "bytes=0-2047"
     }
 }
 

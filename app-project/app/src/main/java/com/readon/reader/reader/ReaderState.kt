@@ -46,6 +46,37 @@ class ReaderState {
     /** Page within the current chapter. */
     var pageInChapter: Int by mutableStateOf(0)
 
+    /**
+     * Whether the text on screen is only part of the book.
+     *
+     * Online reading fetches a prefix and opens on it, so the reader has to know
+     * that the end of what it has is not the end of the book -- otherwise the
+     * footer would count a provisional chapter list as the whole outline, and
+     * auto-read would stop in the middle of a novel it thinks is finished.
+     */
+    var partial: Boolean by mutableStateOf(false)
+
+    /**
+     * Whether the remainder is still being fetched.
+     *
+     * Separate from [partial]: the prefix is on screen either way, but the footer
+     * only says "正在后台下载…" while that is still true, and says nothing once the
+     * whole book has arrived.
+     */
+    var finishing: Boolean by mutableStateOf(false)
+
+    /**
+     * Whether automatic reading is running.
+     *
+     * Held here rather than in a composable's `remember` so that opening a panel,
+     * rotating the device or changing the font does not silently stop it. Whether
+     * a newly opened book starts in this state comes from `Prefs.autoReadEnabled`,
+     * which the reader's play button also writes -- so "I read like this" is
+     * remembered across books without any book starting to turn its own pages
+     * before the reader has asked for it once.
+     */
+    var autoRead: Boolean by mutableStateOf(false)
+
     /** Whether the reader chrome (bars, toolbar) is showing. */
     var chromeVisible: Boolean by mutableStateOf(true)
 
@@ -105,6 +136,17 @@ class ReaderState {
      */
     var currentOffset: Int by mutableStateOf(0)
 
+    /**
+     * Bumped whenever the *text* is replaced, which for now means when a partial
+     * online read is completed.
+     *
+     * A cheap counter rather than keying effects on [BookContent]: that is a data
+     * class holding the whole book, so using it as a key would compare tens of
+     * millions of characters on every recomposition.
+     */
+    var contentGeneration: Int by mutableStateOf(0)
+        private set
+
     val content: BookContent? get() = (status as? Status.Ready)?.content
 
     val chapters: List<Chapters.Chapter> get() = content?.chapters.orEmpty()
@@ -125,10 +167,14 @@ class ReaderState {
         bookmarksVisible = false
         optionsVisible = false
         chromeVisible = true
+        partial = false
+        finishing = false
+        autoRead = false
     }
 
     fun succeed(content: BookContent, chapter: Int, page: Int) {
         this.status = Status.Ready(content)
+        contentGeneration++
         // Clamp a restored position against the book that was actually loaded;
         // the stored chapter may be stale if the book was revised upstream.
         val chapters = content.chapters
@@ -138,6 +184,30 @@ class ReaderState {
             else -> 0
         }
         pageInChapter = page.coerceAtLeast(0)
+    }
+
+    /**
+     * Replace the text with a fuller copy of the same book.
+     *
+     * Used when the background transfer finishes: the reader has been reading a
+     * prefix, and the rest of the novel has just arrived. The reading position is
+     * a character offset, and the new text is a strict extension of the old one,
+     * so the offset still means the same place -- which is what makes this
+     * invisible to the reader rather than a jump back to the start.
+     *
+     * The chapter index is deliberately *not* recomputed from the offset: the
+     * outline the reader is looking at was built from a prefix, and re-deriving
+     * it could move them to a different chapter number for the same sentence.
+     */
+    fun extend(content: BookContent) {
+        if (status !is Status.Ready) return
+        status = Status.Ready(content)
+        contentGeneration++
+        partial = false
+        finishing = false
+        if (chapterIndex >= content.chapters.size) {
+            chapterIndex = (content.chapters.size - 1).coerceAtLeast(-1)
+        }
     }
 
     fun fail(message: String) {

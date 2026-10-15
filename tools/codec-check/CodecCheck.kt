@@ -1,5 +1,7 @@
 package com.readon.reader.data
 
+import com.readon.reader.data.PartialRead
+import com.readon.reader.reader.AutoRead
 import com.readon.reader.reader.PageCursor
 import com.readon.reader.reader.TextFlow
 import com.readon.reader.update.UpdateDecision
@@ -1053,6 +1055,109 @@ fun main() {
         "${UpdateDecision.versionCodeOf("v1.0.5")}",
     )
     check("无法解析的版本名 -> 0", UpdateDecision.versionCodeOf("未知") == 0)
+
+    println()
+    println("== 自动阅读 ==")
+
+    // The clamp is the whole safety property: a stored 0 would turn pages as fast
+    // as the device can, which reads as the book flicking itself to the end.
+    check("默认间隔在范围内", AutoRead.clampSeconds(AutoRead.DEFAULT_SECONDS) == AutoRead.DEFAULT_SECONDS)
+    check("0 秒被抬到下限", AutoRead.clampSeconds(0) == AutoRead.MIN_SECONDS, "${AutoRead.clampSeconds(0)}")
+    check("负数被抬到下限", AutoRead.clampSeconds(-5) == AutoRead.MIN_SECONDS)
+    check(
+        "超大值被压到上限",
+        AutoRead.clampSeconds(100000) == AutoRead.MAX_SECONDS,
+        "${AutoRead.clampSeconds(100000)}",
+    )
+    check("下限本身不变", AutoRead.clampSeconds(AutoRead.MIN_SECONDS) == AutoRead.MIN_SECONDS)
+    check("上限本身不变", AutoRead.clampSeconds(AutoRead.MAX_SECONDS) == AutoRead.MAX_SECONDS)
+
+    // A clamped value must never produce a zero-delay wait, which is what would
+    // make the timer a busy loop.
+    check(
+        "任何输入都产生正的等待时间",
+        listOf(-1, 0, 1, 3, 15, 60, 61, 9999).all { AutoRead.delayMillis(it) > 0L },
+        listOf(-1, 0, 1, 3, 15, 60, 61, 9999).joinToString { "${it}->${AutoRead.delayMillis(it)}" },
+    )
+    check("等待时间与秒数一致", AutoRead.delayMillis(15) == 15_000L, "${AutoRead.delayMillis(15)}")
+    check("超限秒数的等待时间被夹紧", AutoRead.delayMillis(0) == AutoRead.MIN_SECONDS * 1000L)
+
+    // The label and the behaviour have to come from the same clamp, or the panel
+    // could promise "3 秒" while the reader waits something else.
+    check("标签显示夹紧后的秒数", AutoRead.label(0) == "${AutoRead.MIN_SECONDS} 秒/页", AutoRead.label(0))
+    check("标签显示原值（在范围内）", AutoRead.label(20) == "20 秒/页", AutoRead.label(20))
+
+    println()
+    println("== 在线阅读的部分下载 ==")
+
+    // --- Content-Range ------------------------------------------------------
+    val full = PartialRead.parseContentRange("bytes 0-2047/12345678")
+    check("解析 Content-Range", full != null, "null")
+    check("起点正确", full?.start == 0L, "${full?.start}")
+    check("终点正确", full?.end == 2047L, "${full?.end}")
+    check("总大小正确", full?.total == 12345678L, "${full?.total}")
+    check("区间长度正确", full?.length == 2048L, "${full?.length}")
+
+    val middle = PartialRead.parseContentRange("bytes 2048-4095/10000")
+    check("解析中段区间", middle?.start == 2048L && middle.end == 4095L && middle.total == 10000L)
+
+    // `*` is the "range known, size not stated" answer and must not be guessed at.
+    val unknown = PartialRead.parseContentRange("bytes 0-99/*")
+    check("总大小为 * 时报告未知", unknown?.total == 0L, "${unknown?.total}")
+    check("总大小为 * 时区间仍然可用", unknown?.length == 100L, "${unknown?.length}")
+
+    check("空头返回 null", PartialRead.parseContentRange(null) == null)
+    check("空字符串返回 null", PartialRead.parseContentRange("") == null)
+    check("错误格式返回 null", PartialRead.parseContentRange("items 0-10/20") == null)
+    check("缺少斜杠返回 null", PartialRead.parseContentRange("bytes 0-10") == null)
+    check("终点早于起点返回 null", PartialRead.parseContentRange("bytes 10-5/20") == null)
+    check("大写 Bytes 也能解析", PartialRead.parseContentRange("Bytes 0-1/2") != null)
+    check("多余空格被容忍", PartialRead.parseContentRange("  bytes 0-1/2  ") != null)
+
+    // --- completeness -------------------------------------------------------
+    //
+    // Only a known, positive total can prove the file is whole. An unknown size
+    // answering "yes" would show a truncated book as a finished one.
+    check("已知大小且收满即为完整", PartialRead.isComplete(1000, 1000))
+    check("收到超出报告大小也算完整", PartialRead.isComplete(1200, 1000))
+    check("少于报告大小不完整", !PartialRead.isComplete(500, 1000))
+    check("大小未知时不敢断言完整", !PartialRead.isComplete(1000, 0))
+    check("零字节且大小未知不完整", !PartialRead.isComplete(0, 0))
+    check("零字节但大小为 0 不完整", !PartialRead.isComplete(0, 0))
+
+    // --- first chunk --------------------------------------------------------
+    check("小书一次取完", PartialRead.firstChunk(500, 2048) == 500L, "${PartialRead.firstChunk(500, 2048)}")
+    check("大书只取前缀", PartialRead.firstChunk(50_000_000, 2048) == 2048L)
+    check(
+        "大小刚好等于前缀时一次取完",
+        PartialRead.firstChunk(2048, 2048) == 2048L,
+        "${PartialRead.firstChunk(2048, 2048)}",
+    )
+    check("大小未知时取前缀", PartialRead.firstChunk(0, 2048) == 2048L)
+    check("前缀预算为 0 时取 0", PartialRead.firstChunk(1000, 0) == 0L)
+
+    // --- the dangling replacement character ---------------------------------
+    //
+    // A prefix ends mid-character, so a streaming decode leaves exactly one
+    // U+FFFD at the end. Showing it would put a visible "?" at the foot of the
+    // last page the reader has.
+    check("末尾替换字符被去掉", PartialRead.trimDanglingReplacement("正文\uFFFD") == "正文")
+    check("没有替换字符时不变", PartialRead.trimDanglingReplacement("正文") == "正文")
+    check("空文本不崩溃", PartialRead.trimDanglingReplacement("") == "")
+    check("只有替换字符时变空", PartialRead.trimDanglingReplacement("\uFFFD") == "")
+    // Only a *trailing* one goes: a replacement character in the middle is either
+    // a real decoding failure in the source file or TextCodec's deliberate lossy
+    // fallback, and hiding those would hide "this file is corrupt".
+    check(
+        "中间的替换字符被保留",
+        PartialRead.trimDanglingReplacement("正\uFFFD文") == "正\uFFFD文",
+        PartialRead.trimDanglingReplacement("正\uFFFD文"),
+    )
+    check(
+        "只去掉最后一个",
+        PartialRead.trimDanglingReplacement("正\uFFFD\uFFFD") == "正\uFFFD",
+        PartialRead.trimDanglingReplacement("正\uFFFD\uFFFD"),
+    )
 
     println()
     if (failures == 0) {

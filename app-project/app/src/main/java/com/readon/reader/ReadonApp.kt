@@ -5,6 +5,7 @@ import android.content.Context
 import com.readon.reader.data.BookStore
 import com.readon.reader.data.BookmarkStore
 import com.readon.reader.data.OnlineCache
+import com.readon.reader.data.OnlineFetcher
 import com.readon.reader.data.OnlineLibrary
 import com.readon.reader.data.Prefs
 import com.readon.reader.net.GithubClient
@@ -44,6 +45,19 @@ class ReadonApp : Application() {
         private set
 
     /**
+     * How a book read online is fetched: a readable prefix first, the rest behind
+     * the reader's back.
+     *
+     * At application scope rather than in the reader, because finishing a
+     * download must outlive the screen that started it -- a reader who opens a
+     * book, reads two pages and goes back to the shelf has not asked for the
+     * download to stop, and the next open being instant is the whole point.
+     * See [OnlineFetcher].
+     */
+    lateinit var onlineFetcher: OnlineFetcher
+        private set
+
+    /**
      * Work that must outlive a screen.
      *
      * Library refreshes and downloads run here rather than on a composable's
@@ -72,8 +86,14 @@ class ReadonApp : Application() {
         store = BookStore(this)
         bookmarks = BookmarkStore(this)
         onlineCache = OnlineCache(this)
+        onlineFetcher = OnlineFetcher(
+            client = github,
+            cache = onlineCache,
+            scratchDir = java.io.File(cacheDir, "readon-online"),
+            scope = appScope,
+        )
         updates = UpdateManager(this, prefs, github)
-        library = OnlineLibrary(prefs, github, store, appScope)
+        library = OnlineLibrary(prefs, github, store, appScope, onlineCache)
         updateCenter = UpdateCenter(prefs, updates, appScope)
     }
 

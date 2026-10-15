@@ -64,7 +64,7 @@ REM The compiler needs its own dependencies on the classpath; the code under tes
 REM only needs the stdlib.
 set "COMPILER_CP=%KOTLIN_HOME%;%STDLIB%;%TROVE%;%ANNOT%;%SCRIPT_RT%"
 
-echo [info] compiling the app's TextCodec, Chapters, PageCursor, TextFlow, ReaderInk, Bookmarks, OnlineCachePolicy, UpdateDecision and ShelfLabels...
+echo [info] compiling the app's TextCodec, Chapters, PageCursor, TextFlow, ReaderInk, Bookmarks, OnlineCachePolicy, PartialRead, AutoRead, UpdateDecision and ShelfLabels...
 REM -no-stdlib/-no-reflect: the compiler is run from a bare jar rather than a Kotlin
 REM distribution, so it must not go looking for a "Kotlin home" it does not have.
 REM The stdlib is supplied explicitly through -cp instead.
@@ -74,13 +74,14 @@ REM crash it fixes (an empty page list asked for its last entry) is only caught 
 REM exercising the real code, and Model.kt/ShelfLabels.kt are what the shelf
 REM renders. Kotlin only needs the files it is handed, so the Android imports in
 REM the surrounding classes never come into it -- which is also why TextFlow.kt,
-REM ReaderInk.kt, Bookmarks.kt, OnlineCachePolicy.kt and UpdateDecision.kt are kept
-REM free of Android and Compose types.
+REM ReaderInk.kt, Bookmarks.kt, OnlineCachePolicy.kt, PartialRead.kt, AutoRead.kt
+REM and UpdateDecision.kt are kept free of Android and Compose types.
 "%JDK%\bin\java.exe" -cp "%COMPILER_CP%" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler ^
   -no-stdlib -no-reflect -nowarn -cp "%STDLIB%" -d "%OUT%" ^
   "%SRC%\TextCodec.kt" "%SRC%\Chapters.kt" "%SRC%\Model.kt" "%SRC%\ShelfLabels.kt" ^
   "%SRC%\ReaderInk.kt" "%SRC%\Bookmarks.kt" "%SRC%\OnlineCachePolicy.kt" ^
-  "%SRC_READER%\PageCursor.kt" "%SRC_READER%\TextFlow.kt" ^
+  "%SRC%\PartialRead.kt" ^
+  "%SRC_READER%\PageCursor.kt" "%SRC_READER%\TextFlow.kt" "%SRC_READER%\AutoRead.kt" ^
   "%SRC_UPDATE%\UpdateDecision.kt" ^
   "%ROOT%\tools\codec-check\CodecCheck.kt"
 

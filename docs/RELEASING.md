@@ -81,8 +81,8 @@ git push -u origin main
 `app-project/app/build.gradle.kts`：
 
 ```kotlin
-val appVersionCode: Int = (System.getenv("READON_VERSION_CODE") ?: "10005").toIntOrNull()
-val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.5"
+val appVersionCode: Int = (System.getenv("READON_VERSION_CODE") ?: "10006").toIntOrNull()
+val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.6"
 ```
 
 `versionCode` 的算法是 `major*10000 + minor*100 + patch`：
@@ -95,6 +95,7 @@ val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.5"
 | 1.0.3 | 10003 |
 | 1.0.4 | 10004 |
 | 1.0.5 | 10005 |
+| 1.0.6 | 10006 |
 | 1.1.0 | 10100 |
 | 2.0.0 | 20000 |
 
@@ -121,8 +122,8 @@ val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.5"
 
 ```powershell
 build.cmd assembleRelease
-copy app-project\app\build\outputs\apk\release\app-release.apk dist\readon-1.0.5.apk
-python tools\ci_release.py --name 1.0.5 --apk dist\readon-1.0.5.apk
+copy app-project\app\build\outputs\apk\release\app-release.apk dist\readon-1.0.6.apk
+python tools\ci_release.py --name 1.0.6 --apk dist\readon-1.0.6.apk
 check.cmd
 ```
 
@@ -138,7 +139,7 @@ check.cmd
 - `.gitignore` 排除了 `keystore.properties`、`*.jks`、`local.properties`
 - `.gitignore` 里 `*.jar` 规则有 `!gradle/wrapper/gradle-wrapper.jar` 例外（少了它，克隆下来无法构建）
 - Gradle wrapper 三个文件齐全
-- 书籍逻辑：编码检测（UTF-8 / GBK / UTF-16 / BOM / ASCII 开头 + GBK 正文）、章节切分、分页游标（首页不能对着空列表取 `last()`，以及章末空行不再产生空白页）、滚动分段、阅读配色对比度、书签、在线阅读缓存的命中判定与 LRU 淘汰、更新检查两个来源的合并规则（过期清单不得谎报「已是最新」），与书架标签的日期边界
+- 书籍逻辑：编码检测（UTF-8 / GBK / UTF-16 / BOM / ASCII 开头 + GBK 正文）、章节切分、分页游标（首页不能对着空列表取 `last()`，以及章末空行不再产生空白页）、滚动分段、阅读配色对比度、书签、在线阅读缓存的命中判定与 LRU 淘汰、**自动阅读的夹紧规则**（0 秒 / 负数 / 超大值都落到 3–60 秒）、**部分下载的判定**（`Content-Range` 解析、「大小未知时不敢断言完整」、只去掉末尾那一个替换字符），更新检查两个来源的合并规则（过期清单不得谎报「已是最新」），与书架标签的日期边界
 - 发布产物自洽：`dist/update.json` 的 `sha256` 与 `dist/readon-<版本>.apk` **实际**
   一致，`versionCode` 算术正确，`apkUrl` 指向存在的文件名，说明与 CHANGELOG 章节逐字相同
 
@@ -153,10 +154,10 @@ check.cmd
 
 ```powershell
 git add -A
-git commit -m "chore(release): 1.0.5"
+git commit -m "chore(release): 1.0.6"
 git push
-git tag v1.0.5
-git push origin v1.0.5
+git tag v1.0.6
+git push origin v1.0.6
 ```
 
 ### 4. 之后自动发生的事
@@ -216,6 +217,7 @@ tools/
 ├── check-book-logic.cmd    # 编码检测、章节切分、分页与书架标签（桌面运行）
 ├── make_icon.py            # 从设计原图派生各密度图标
 ├── check_mirrors.py        # 探测 GitHub 线路可用性
+├── check_ranges.py         # 探测各线路是否遵守 Range（「先下载一部分」的前提）
 └── verify_read_path.py     # 端到端验证读取链路
 ```
 

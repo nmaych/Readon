@@ -42,7 +42,7 @@ class UnsupportedBookException(message: String) : Exception(message)
  *     becomes a chapter.
  *   * `pdf` -- not rendered here. See [UnsupportedBookException].
  *
- * ## Why online reading goes through a temp file
+ * ## Why online reading fetches a prefix, not the file
  *
  * The first version fetched the whole book into a `ByteArray` and then decoded
  * it, which is two full copies of a file that can be 75 MB before a single
@@ -50,9 +50,16 @@ class UnsupportedBookException(message: String) : Exception(message)
  * three bytes per character. That is what made "在线阅读" stall on "正在排版…" and
  * then die on low-memory devices.
  *
- * A text book is now streamed to a cache file and decoded from disk, so peak
- * memory is one character buffer and the result. EPUB is the exception and stays
- * in memory, because reading a zip genuinely needs random access to the bytes.
+ * It was then changed to stream the whole file to disk and decode from there,
+ * which fixed the memory problem but left the *wait*: a 75 MB novel on a phone
+ * connection is minutes of "正在下载… 3%" before the first page. So a text book is
+ * now fetched in pieces by [OnlineFetcher]: a prefix large enough to read for a
+ * long while is all that is needed to open the book, and the remainder arrives in
+ * the background. Decoding still happens from disk, so peak memory is one
+ * character buffer and the result.
+ *
+ * EPUB is the exception and stays in memory, because reading a zip genuinely
+ * needs random access to the bytes.
  *
  * @param onStage reports what is happening, so the reader can say "正在下载…"
  *   rather than showing a single unchanging "正在排版…".
@@ -61,16 +68,32 @@ class BookLoader(
     private val context: Context,
     private val client: GithubClient,
     /**
-     * Where a book read online is kept between reads.
+     * Where a book read online is kept between reads, and how its remainder is
+     * fetched once a prefix is on screen.
      *
      * Optional so the loader still works without one; when absent, an online book
-     * is fetched fresh every time, which is what every version before this one
-     * did.
+     * is fetched fresh every time, which is what every version before 1.0.5 did.
      */
-    private val cache: OnlineCache? = null,
+    private val fetcher: OnlineFetcher? = null,
 ) {
 
-    suspend fun load(book: Book, onStage: (String) -> Unit = {}): BookContent =
+    /** The text that was loaded, and whether more of the book is still coming. */
+    data class Loaded(
+        val content: BookContent,
+        /**
+         * True when only part of the file was on disk, so the rest is being
+         * fetched. The reader uses it to say "正在后台下载…" and to know that the
+         * end of what it has is not the end of the book.
+         */
+        val partial: Boolean = false,
+        /**
+         * Fetch the remainder and hand back the full text, or null when there is
+         * nothing left to fetch or no fetcher configured.
+         */
+        val finish: (suspend () -> BookContent?)? = null,
+    )
+
+    suspend fun load(book: Book, onStage: (String) -> Unit = {}): Loaded =
         withContext(Dispatchers.IO) {
             when (book.formatEnum) {
                 BookFormat.TXT, BookFormat.MD -> textContent(book, stripMarkup = false, onStage)
@@ -104,28 +127,62 @@ class BookLoader(
         book: Book,
         stripMarkup: Boolean,
         onStage: (String) -> Unit,
-    ): BookContent {
+    ): Loaded {
         val local = localFileOf(book)
         if (local != null) {
             onStage("正在排版…")
-            return decodeText(book, local, stripMarkup)
+            return Loaded(decodeText(book, local, stripMarkup))
         }
 
-        // Online. A cached copy means this book has been read before on this
-        // device, so the download -- the slow, failure-prone part on the networks
-        // this app is built for -- is skipped entirely.
-        val cached = cache?.get(book)
-        if (cached != null) {
+        // A book that is already complete on this device -- read to the end once,
+        // or downloaded to the shelf -- is never fetched again. This is checked
+        // before anything touches the network, because it is the common case for
+        // a book the reader is coming back to.
+        val complete = fetcher?.completeCopy(book)
+        if (complete != null) {
             onStage("正在读取缓存…")
-            return decodeText(book, cached, stripMarkup)
+            return Loaded(decodeText(book, complete, stripMarkup))
         }
+
+        // No fetcher configured: the old behaviour, a straight whole-file fetch.
+        val fetcher = this.fetcher
+            ?: return Loaded(decodeWholeFile(book, stripMarkup, onStage))
 
         onStage("正在连接线路…")
-        // Download into the cache's own staging file when there is a cache, so a
-        // successful read costs one rename rather than a second copy of a file
-        // that can be 75 MB. Without a cache this is a plain scratch file.
-        val target = cache
-        val staging = target?.partFileFor(book) ?: File(context.cacheDir, "readon-online")
+        val fetched = fetcher.ensureReadable(book, onStage)
+        onStage("正在排版…")
+        // Decode what is on disk now. For a partial file that is a prefix, and
+        // the chapter split over it is provisional -- which is exactly why the
+        // reader is handed a way to reload once the rest has arrived, rather
+        // than being told the book is finished.
+        val content = decodeText(book, fetched.file, stripMarkup, partial = !fetched.complete)
+        if (fetched.complete) {
+            // Everything is here already, so there is nothing to finish; promote
+            // it so the next open is local.
+            fetcher.promote(book, fetched.file)
+            return Loaded(content)
+        }
+        return Loaded(
+            content = content,
+            partial = true,
+            finish = {
+                val file = fetcher.awaitComplete(book)
+                // Decoding a whole novel is seconds of work; it must not happen on
+                // whatever dispatcher is awaiting this.
+                if (file == null) null
+                else withContext(Dispatchers.IO) { decodeText(book, file, stripMarkup) }
+            },
+        )
+    }
+
+    /** The pre-1.0.6 path: fetch the whole file, then decode it. */
+    private suspend fun decodeWholeFile(
+        book: Book,
+        stripMarkup: Boolean,
+        onStage: (String) -> Unit,
+    ): BookContent {
+        onStage("正在连接线路…")
+        val scratch = File(context.cacheDir, "readon-online")
             .apply { mkdirs() }
             .let { File(it, "online-${book.id.hashCode()}.${book.format}") }
         try {
@@ -133,22 +190,15 @@ class BookLoader(
             client.downloadTo(
                 source = book.source,
                 path = book.path,
-                target = staging,
+                target = scratch,
                 expectedSize = book.size,
                 onProgress = { p -> onStage("正在下载… ${(p * 100).toInt()}%") },
                 onStage = onStage,
             )
             onStage("正在排版…")
-            val content = decodeText(book, staging, stripMarkup)
-            // Promote to the cache only after the decode succeeded: a file that
-            // cannot be decoded is not worth caching, and caching it would make
-            // the failure permanent instead of a retry away.
-            if (target != null) runCatching { target.commit(book, staging) }
-            return content
+            return decodeText(book, scratch, stripMarkup)
         } finally {
-            // After a successful commit the staging file has been renamed away, so
-            // this only removes the remains of a failed read.
-            runCatching { if (staging.exists()) staging.delete() }
+            runCatching { if (scratch.exists()) scratch.delete() }
         }
     }
 
@@ -156,11 +206,23 @@ class BookLoader(
         book: Book,
         file: File,
         stripMarkup: Boolean,
+        /**
+         * True when [file] is a prefix of the book rather than the whole thing.
+         *
+         * A prefix ends wherever the byte count ran out, which is usually in the
+         * middle of a character: the streaming decoder turns those trailing bytes
+         * into one U+FFFD, and the reader would draw it at the foot of the last
+         * page it has. Only for a partial file is that character an artefact
+         * rather than a property of the book, so only then is it removed.
+         */
+        partial: Boolean = false,
     ): BookContent {
         val decoded = TextCodec.decodeFile(file)
-        val text = (if (stripMarkup) HtmlText.strip(decoded.text) else decoded.text)
+        val raw = if (stripMarkup) HtmlText.strip(decoded.text) else decoded.text
+        val normalised = raw
             .replace("\r\n", "\n")
             .replace('\r', '\n')
+        val text = if (partial) PartialRead.trimDanglingReplacement(normalised) else normalised
         val chapters = Chapters.split(text)
         return BookContent(
             title = book.title,
@@ -177,7 +239,7 @@ class BookLoader(
      * path is discovered through `META-INF/container.xml` rather than guessed.
      * Spine order, not file order, is what defines reading order.
      */
-    private suspend fun epubContent(book: Book, onStage: (String) -> Unit): BookContent {
+    private suspend fun epubContent(book: Book, onStage: (String) -> Unit): Loaded {
         val local = localFileOf(book)
         val bytes = if (local != null) {
             onStage("正在排版…")
@@ -185,7 +247,7 @@ class BookLoader(
         } else {
             // The same cache as the text formats, so a re-read of an online EPUB
             // does not fetch the zip again.
-            val cached = cache?.get(book)
+            val cached = fetcher?.completeCopy(book)
             if (cached != null) {
                 onStage("正在读取缓存…")
                 cached.readBytes()
@@ -200,7 +262,12 @@ class BookLoader(
                     // Write the bytes through the cache so the next read is local.
                     // Best effort: a cache that cannot be written must not stop the
                     // book from opening.
-                    runCatching { cache?.store(book, fetched) }
+                    //
+                    // An EPUB is the one format that is *not* fetched in pieces:
+                    // a zip needs random access to its bytes, so a prefix of it is
+                    // not a readable book. It is buffered whole, which the 64 MB
+                    // cap above bounds.
+                    runCatching { fetcher?.storeWhole(book, fetched) }
                 }
             }
         }
@@ -254,11 +321,13 @@ class BookLoader(
         }
 
         if (sb.isEmpty()) throw UnsupportedBookException("EPUB 没有可显示的正文")
-        return BookContent(
-            title = book.title,
-            text = sb.toString(),
-            chapters = chapters,
-            charset = "UTF-8",
+        return Loaded(
+            BookContent(
+                title = book.title,
+                text = sb.toString(),
+                chapters = chapters,
+                charset = "UTF-8",
+            )
         )
     }
 

@@ -38,6 +38,15 @@ class OnlineLibrary(
     private val client: GithubClient,
     private val store: BookStore,
     private val scope: CoroutineScope,
+    /**
+     * The disposable online-reading cache.
+     *
+     * Held only so a completed *shelf* download can drop the cache's copy of the
+     * same book: once the book lives on the shelf, the cache's version is a
+     * second full copy of a file that can be 75 MB, kept for a speed-up nobody
+     * needs any more. Optional so the library still works without one.
+     */
+    private val cache: OnlineCache? = null,
 ) {
 
     /** One book being downloaded, and how far along it is. */
@@ -74,6 +83,19 @@ class OnlineLibrary(
 
     /** Ids that already have a file on the device. */
     var downloadedIds: Set<String> by mutableStateOf(emptySet())
+        private set
+
+    /**
+     * The shelf's own record for each downloaded book, keyed by id.
+     *
+     * The listing's entries and the shelf's records describe the same book but
+     * are not the same object: only the shelf's has `localFile` set. Opening a
+     * book from 主页 has to hand the reader the *shelf's* record when there is
+     * one, or the reader would go to the network for a file that is already on
+     * the device -- and then write a second copy of it into the online cache.
+     * That is the "already downloaded, but tapping it downloads it again" bug.
+     */
+    var downloaded: Map<String, Book> by mutableStateOf(emptyMap())
         private set
 
     /** Books being downloaded right now, keyed by id. */
@@ -165,8 +187,28 @@ class OnlineLibrary(
 
     /** Re-read which books have a local copy. */
     fun refreshDownloaded() {
-        scope.launch { downloadedIds = store.downloadedIds() }
+        scope.launch {
+            val shelf = store.load()
+            downloaded = shelf.associateBy { it.id }
+            downloadedIds = shelf.mapTo(HashSet()) { it.id }
+        }
     }
+
+    /**
+     * The record to hand the reader for [book].
+     *
+     * The shelf's copy when the book has been downloaded, because that one points
+     * at the file on the device; the listing's entry otherwise. Without this,
+     * opening a downloaded book from 主页 went to the network for a file that was
+     * already there -- and, having gone to the network, wrote a second copy of it
+     * into the online-reading cache as well.
+     *
+     * The shelf record is preferred even when its file has since been removed
+     * (`localFile` set but the file gone): [BookLoader] then reports that plainly
+     * and falls back to the network, which is a better answer than silently
+     * fetching a fresh copy the user did not ask for.
+     */
+    fun openable(book: Book): Book = downloaded[book.id] ?: book
 
     // --- downloading -------------------------------------------------------
 
@@ -224,7 +266,12 @@ class OnlineLibrary(
                     },
                 )
                 store.register(book, target, target.length())
-                downloadedIds = store.downloadedIds()
+                // The shelf copy is now the one that will be read, so the cache's
+                // copy of the same book is a duplicate of a file that can be
+                // 75 MB. Dropping it here is what keeps "downloaded" from meaning
+                // "stored twice".
+                cache?.remove(book)
+                refreshDownloaded()
                 onDone("已下载：${book.title}")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // The process is going away; leave the partial file for cleanup.

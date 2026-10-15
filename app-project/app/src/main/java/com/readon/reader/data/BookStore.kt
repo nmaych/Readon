@@ -282,11 +282,6 @@ class BookStore(private val context: Context) {
         lock.withLock { readIndex().firstOrNull { it.id == id } }
     }
 
-    /** The ids that have a local copy, for the library's "已在书架" marker. */
-    suspend fun downloadedIds(): Set<String> = withContext(Dispatchers.IO) {
-        lock.withLock { readIndex().mapTo(HashSet()) { it.id } }
-    }
-
     private fun sanitize(name: String): String {
         val cleaned = name.map { c ->
             if (c in ILLEGAL || c.code < 0x20) '_' else c

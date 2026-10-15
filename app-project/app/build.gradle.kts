@@ -6,13 +6,13 @@ plugins {
 }
 
 // ---------------------------------------------------------------------------
-// Version. major*10000 + minor*100 + patch, so 1.0.0 is 10000 and 1.0.5 is
-// 10005. CI overrides these from the git tag, which keeps the tag, the APK
+// Version. major*10000 + minor*100 + patch, so 1.0.0 is 10000 and 1.0.6 is
+// 10006. CI overrides these from the git tag, which keeps the tag, the APK
 // metadata and dist/update.json from drifting apart.
 // ---------------------------------------------------------------------------
-val appVersionCode: Int = (System.getenv("READON_VERSION_CODE") ?: "10005").toIntOrNull()
+val appVersionCode: Int = (System.getenv("READON_VERSION_CODE") ?: "10006").toIntOrNull()
     ?: error("READON_VERSION_CODE must be an integer")
-val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.5"
+val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.6"
 
 // ---------------------------------------------------------------------------
 // Release signing: environment variables first (CI), then keystore.properties

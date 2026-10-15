@@ -3,6 +3,7 @@ package com.readon.reader.ui.screens
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -11,6 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,6 +28,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -47,6 +51,8 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
@@ -98,6 +104,7 @@ import com.readon.reader.data.Chapters
 import com.readon.reader.data.ReadingMode
 import com.readon.reader.data.ReaderInk
 import com.readon.reader.data.UnsupportedBookException
+import com.readon.reader.reader.AutoRead
 import com.readon.reader.reader.Paginator
 import com.readon.reader.reader.ReaderState
 import com.readon.reader.reader.TextFlow
@@ -110,6 +117,7 @@ import com.readon.reader.ui.theme.ReaderSkin
 import com.readon.reader.ui.theme.ReaderTheme
 import com.readon.reader.ui.theme.toArgbInt
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -185,6 +193,7 @@ fun ReaderScreen(
     val backgroundColorOverride = remember(revision) { prefs.readerBackgroundColor }
     val readingMode = remember(revision) { prefs.readingMode }
     val keepAwake = remember(revision) { prefs.keepScreenOn }
+    val autoReadSeconds = remember(revision) { prefs.autoReadSeconds }
 
     LaunchedEffect(book.id, loadAttempt) {
         state.begin(book)
@@ -194,11 +203,26 @@ fun ReaderScreen(
         val stage = MutableStateFlow(state.stage)
         val stageCollector = launch { stage.collect { state.stage = it } }
         try {
-            val loader = BookLoader(context, app.github, app.onlineCache)
-            val content = withContext(Dispatchers.IO) {
+            val loader = BookLoader(context, app.github, app.onlineFetcher)
+            val loaded = withContext(Dispatchers.IO) {
                 loader.load(book) { s -> stage.value = s }
             }
-            state.succeed(content, book.chapterIndex, 0)
+            state.succeed(loaded.content, book.chapterIndex, 0)
+            // Automatic reading resumes across books when the reader has asked for
+            // it before, but a book never starts turning its own pages the first
+            // time -- the preference is off until the play button is pressed once.
+            state.autoRead = prefs.autoReadEnabled
+            state.partial = loaded.partial
+            if (loaded.partial) {
+                // A prefix is on screen and the rest is arriving behind it. The
+                // reader is usable now, which is the whole point; when the full
+                // text lands it is swapped in under the same reading position.
+                state.finishing = true
+                launch {
+                    val full = runCatching { loaded.finish?.invoke() }.getOrNull()
+                    if (full != null) state.extend(full) else state.finishing = false
+                }
+            }
         } catch (e: UnsupportedBookException) {
             state.fail(e.message ?: "无法打开")
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -314,6 +338,7 @@ fun ReaderScreen(
                 textColorOverride = textColorOverride,
                 backgroundColorOverride = backgroundColorOverride,
                 readingMode = readingMode,
+                autoReadSeconds = autoReadSeconds,
                 measurer = measurer,
                 density = density,
                 onClose = onClose,
@@ -360,6 +385,7 @@ private fun ReaderBody(
     textColorOverride: Int,
     backgroundColorOverride: Int,
     readingMode: ReadingMode,
+    autoReadSeconds: Int,
     measurer: TextMeasurer,
     density: Density,
     onClose: () -> Unit,
@@ -368,6 +394,26 @@ private fun ReaderBody(
 
     val horizontalPadding = 22.dp
     val verticalPadding = 16.dp
+
+    /**
+     * A blank line above the text, so the first line never sits under the phone's
+     * own status bar.
+     *
+     * The reader is edge-to-edge and draws its own background, and the top bar is
+     * hidden most of the time -- which is the point of a reading screen, but it
+     * also means the body text was laid out under the status bar's clock and
+     * battery. This is a fixed inset rather than `statusBarsPadding()` because
+     * the text must clear the *system* UI whether or not the chrome is showing;
+     * keying it on the chrome would make the text jump by a line every time the
+     * toolbar was toggled.
+     *
+     * One extra blank line's worth is added on top of the status bar so the first
+     * line of a page is not flush against the clock either.
+     */
+    val topInset = with(density) {
+        val statusBar = WindowInsets.statusBars.getTop(this).toDp()
+        statusBar + BLANK_LINE_DP
+    }
 
     /**
      * Move to a chapter.
@@ -414,15 +460,30 @@ private fun ReaderBody(
             (constraints.maxWidth - horizontalPadding.toPx() * 2).toInt()
         }
         val pageHeightPx = with(density) {
-            (constraints.maxHeight - verticalPadding.toPx() * 2).toInt()
+            // The top inset is part of the page's padding, so it has to come out
+            // of the measured height as well: paginating against the full height
+            // would produce pages whose last line is drawn under the status bar
+            // -- measured as fitting, and then clipped.
+            (constraints.maxHeight - (verticalPadding * 2 + topInset).toPx()).toInt()
         }
 
         // The paginator is built here rather than inside [PagedReader] because the
         // footer needs it too: "第 12 / 340 页" is the paginator's own count, and
         // threading it back out of the child would be worse than owning it here.
         // Null in scroll mode, where there are no pages to count.
+        //
+        // Keyed on `contentGeneration` rather than on `content`: `BookContent` is
+        // a data class holding the whole book, and while comparing it is cheap
+        // when the instance is unchanged, the counter says exactly what is meant
+        // -- "the text was replaced".
         val paginator = if (readingMode == ReadingMode.Paged) {
-            remember(content, state.chapterIndex, pageWidthPx, pageHeightPx, textStyle) {
+            remember(
+                state.contentGeneration,
+                state.chapterIndex,
+                pageWidthPx,
+                pageHeightPx,
+                textStyle,
+            ) {
                 if (pageWidthPx <= 0 || pageHeightPx <= 0) {
                     null
                 } else {
@@ -458,6 +519,8 @@ private fun ReaderBody(
                 paginator = paginator,
                 horizontalPadding = horizontalPadding,
                 verticalPadding = verticalPadding,
+                topInset = topInset,
+                autoReadSeconds = autoReadSeconds,
                 goToChapter = ::goToChapter,
             )
 
@@ -470,6 +533,8 @@ private fun ReaderBody(
                 textStyle = textStyle,
                 horizontalPadding = horizontalPadding,
                 verticalPadding = verticalPadding,
+                topInset = topInset,
+                autoReadSeconds = autoReadSeconds,
             )
         }
 
@@ -510,6 +575,22 @@ private fun ReaderBody(
                 skin = skin,
                 mode = readingMode,
                 paginator = paginator,
+                autoReadSeconds = autoReadSeconds,
+                onToggleAutoRead = {
+                    // The button writes the preference as well as the session
+                    // state, so "I read with the pages turning themselves" carries
+                    // to the next book instead of having to be re-armed every time.
+                    val next = !state.autoRead
+                    state.autoRead = next
+                    app.prefs.autoReadEnabled = next
+                    // Starting to read automatically means putting the phone down,
+                    // so the bars get out of the way -- they are drawn *over* the
+                    // text, and leaving them up would cover the first lines of
+                    // every page the reader is not touching. Pausing does the
+                    // opposite: it is a sign someone is holding the phone, so the
+                    // controls come back within reach.
+                    state.chromeVisible = !next
+                },
                 onPrevChapter = {
                     if (state.chapterIndex > 0) goToChapter(state.chapterIndex - 1)
                 },
@@ -610,6 +691,8 @@ private fun PagedReader(
     paginator: Paginator?,
     horizontalPadding: androidx.compose.ui.unit.Dp,
     verticalPadding: androidx.compose.ui.unit.Dp,
+    topInset: androidx.compose.ui.unit.Dp,
+    autoReadSeconds: Int,
     goToChapter: (Int, Boolean) -> Unit,
 ) {
 
@@ -682,22 +765,68 @@ private fun PagedReader(
         )
     }
 
-    fun turn(delta: Int) {
-        val p = paginator ?: return
+    /**
+     * Turn one page, and report whether there was a page to turn to.
+     *
+     * The boolean is what automatic reading keys on: at the end of the book there
+     * is nowhere to go, and auto-read stops there rather than wrapping to page
+     * one and quietly moving the reader's saved position with it.
+     */
+    fun turn(delta: Int): Boolean {
+        val p = paginator ?: return false
         val next = state.pageInChapter + delta
         if (next < 0) {
-            if (state.chapterIndex > 0) goToChapter(state.chapterIndex - 1, true)
-            return
+            if (state.chapterIndex > 0) {
+                goToChapter(state.chapterIndex - 1, true)
+                return true
+            }
+            return false
         }
         // Producing the next page is how "is there one?" is answered: pages
         // are computed on demand, so there is no up-front count to consult.
         p.ensurePage(next)
         if (next < p.pageCount) {
             state.pageInChapter = next
-        } else if (content.chapters.isNotEmpty() &&
+            return true
+        }
+        if (content.chapters.isNotEmpty() &&
             state.chapterIndex + 1 < content.chapters.size
         ) {
             goToChapter(state.chapterIndex + 1, false)
+            return true
+        }
+        return false
+    }
+
+    // --- automatic reading ----------------------------------------------
+    //
+    // The timer is keyed on the page as well as the switch, so it restarts from
+    // zero whenever the position changes -- by the timer itself, by a tap, or by
+    // the reader jumping in from the outline. Without that, a page the reader
+    // turned by hand could be replaced a moment later by a tick that was already
+    // most of the way through its wait.
+    //
+    // `contentGeneration` is a key because of online reading: while a book is
+    // still arriving, the last page of the prefix is not the last page of the
+    // book, so the timer must be woken again when the rest lands rather than
+    // concluding the novel has ended.
+    LaunchedEffect(
+        state.autoRead,
+        autoReadSeconds,
+        state.pageInChapter,
+        state.chapterIndex,
+        state.contentGeneration,
+    ) {
+        if (!state.autoRead) return@LaunchedEffect
+        delay(AutoRead.delayMillis(autoReadSeconds))
+        if (!state.autoRead) return@LaunchedEffect
+        if (turn(1)) return@LaunchedEffect
+        // Nowhere to go. If more of the book is still being fetched, this is not
+        // the end of anything -- wait for it rather than stopping.
+        if (!state.partial) {
+            // The end of the book. Stop and say so, rather than turning back to
+            // the beginning.
+            state.autoRead = false
         }
     }
 
@@ -705,15 +834,28 @@ private fun PagedReader(
     Box(
         Modifier
             .fillMaxSize()
-            .padding(horizontal = horizontalPadding, vertical = verticalPadding)
+            .padding(
+                start = horizontalPadding,
+                end = horizontalPadding,
+                // The top inset is added to the usual vertical padding: the text
+                // has to clear the phone's status bar whether or not the reader's
+                // own top bar is showing.
+                top = verticalPadding + topInset,
+                bottom = verticalPadding,
+            )
             .pointerInput(paginator, state.chapterIndex) {
                 detectTapGestures { offset ->
                     val third = size.width / 3f
                     when {
                         offset.x < third -> turn(-1)
                         offset.x > third * 2 -> turn(1)
+                        // A tap in the middle opens the toolbar. Any tap is also
+                        // a sign that someone is holding the phone, so automatic
+                        // reading pauses: carrying on from under their finger
+                        // would move the page they are looking at.
                         else -> state.chromeVisible = !state.chromeVisible
                     }
+                    if (state.autoRead) state.autoRead = false
                 }
             },
     ) {
@@ -750,6 +892,8 @@ private fun ScrollReader(
     textStyle: TextStyle,
     horizontalPadding: androidx.compose.ui.unit.Dp,
     verticalPadding: androidx.compose.ui.unit.Dp,
+    topInset: androidx.compose.ui.unit.Dp,
+    autoReadSeconds: Int,
 ) {
     // The block split is a full pass over the book -- roughly 160 ms for 8M
     // characters on a desktop JVM, and several times that on a low-end phone for
@@ -760,7 +904,14 @@ private fun ScrollReader(
     // Deliberately *not* keyed on the text style: blocks are character ranges, so
     // a font or colour change does not invalidate them, and recomputing them per
     // style change would be another full pass over the book for nothing.
-    val blocks by produceState(initialValue = null as List<TextFlow.Block>?, content) {
+    val blocks by produceState(
+        initialValue = null as List<TextFlow.Block>?,
+        // Keyed on the generation counter rather than on `content`: `BookContent`
+        // is a data class holding the whole book, so comparing it as a key would
+        // mean comparing tens of millions of characters. The counter changes
+        // exactly when the text does.
+        state.contentGeneration,
+    ) {
         value = withContext(Dispatchers.Default) { TextFlow.blocks(content.text) }
     }
     val listState = rememberLazyListState()
@@ -838,11 +989,60 @@ private fun ScrollReader(
             }
     }
 
+    /**
+     * Automatic reading in scrolling mode.
+     *
+     * "One page" here is one screenful, which is what the mode's unit of reading
+     * is -- there are no pages to turn. The loop rather than a keyed
+     * `LaunchedEffect` per position: an animated scroll changes the first visible
+     * index as it passes block boundaries, and keying on that would cancel the
+     * animation half-way through and start the wait over.
+     *
+     * The wait is measured *after* the scroll finishes, so the reader gets the
+     * full interval looking at a settled screen rather than a moving one.
+     */
+    LaunchedEffect(state.autoRead, autoReadSeconds, blocks, state.contentGeneration) {
+        val ready = blocks ?: return@LaunchedEffect
+        if (ready.isEmpty()) return@LaunchedEffect
+        while (state.autoRead) {
+            delay(AutoRead.delayMillis(autoReadSeconds))
+            if (!state.autoRead) break
+            val viewport = listState.layoutInfo.viewportSize.height
+            // A little less than a full screenful, so the first line of the next
+            // screen is one the reader has already seen and the text does not
+            // appear to jump.
+            val step = viewport * 0.92f
+            if (step <= 0f) continue
+            val before = listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+            listState.animateScrollBy(step, tween(SCROLL_STEP_MS))
+            val after = listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+            if (after == before) {
+                // The bottom of what is on the device. While the rest of the book
+                // is still arriving that is not the end of anything, so the loop
+                // keeps waiting; the effect is restarted by `contentGeneration`
+                // when the full text lands.
+                if (state.partial) {
+                    delay(AutoRead.delayMillis(autoReadSeconds))
+                    continue
+                }
+                // The end of the book. Stop rather than starting again from the
+                // top with the saved position following it.
+                state.autoRead = false
+            }
+        }
+    }
+
     Box(
         Modifier
             .fillMaxSize()
             .pointerInput(Unit) {
-                detectTapGestures { state.chromeVisible = !state.chromeVisible }
+                detectTapGestures {
+                    state.chromeVisible = !state.chromeVisible
+                    // A tap means someone is holding the phone; carrying on
+                    // scrolling from under their finger is not what they asked
+                    // for.
+                    if (state.autoRead) state.autoRead = false
+                }
             },
     ) {
         val ready = blocks
@@ -868,14 +1068,16 @@ private fun ScrollReader(
             // plumbing the chrome's measured height back into the list -- is a
             // composition-time loop for a constant.
             //
-            // Top: the top bar is `statusBarsPadding` plus a two-line title and
-            // the book's name (~60 dp of content). Bottom: the progress bar, the
-            // position row and the action row (~74 dp), plus the navigation-bar
-            // inset the reader draws under because it is edge-to-edge.
+            // Top: the status-bar inset plus one blank line, so the first
+            // paragraph is never under the phone's own clock and battery, and the
+            // top bar's own height (~60 dp of content) on top of that. Bottom: the
+            // progress bar, the position row and the action row (~74 dp), plus the
+            // navigation-bar inset the reader draws under because it is
+            // edge-to-edge.
             contentPadding = PaddingValues(
                 start = horizontalPadding,
                 end = horizontalPadding,
-                top = verticalPadding + 60.dp,
+                top = verticalPadding + topInset + 60.dp,
                 bottom = verticalPadding + 92.dp,
             ),
         ) {
@@ -901,6 +1103,19 @@ private fun ScrollReader(
 
 /** Signals "the last page of this chapter"; resolved once the count is known. */
 private const val SENTINEL_LAST_PAGE = Int.MAX_VALUE / 2
+
+/**
+ * The blank line kept above the body text, on top of the status-bar inset.
+ *
+ * The reader is edge-to-edge, so without this the first line of a page sits
+ * directly under the phone's clock and battery. One line's worth of leading is
+ * enough to read as a margin rather than as a mistake, and small enough that a
+ * page does not visibly lose a line of text.
+ */
+private val BLANK_LINE_DP = 14.dp
+
+/** How long one automatic scroll step takes in scrolling mode. */
+private const val SCROLL_STEP_MS = 700
 
 /**
  * The reader's top bar.
@@ -984,6 +1199,8 @@ private fun ReaderBottomBar(
     skin: ReaderSkin,
     mode: ReadingMode,
     paginator: Paginator?,
+    autoReadSeconds: Int,
+    onToggleAutoRead: () -> Unit,
     onPrevChapter: () -> Unit,
     onNextChapter: () -> Unit,
     onOpenToc: () -> Unit,
@@ -1116,6 +1333,19 @@ private fun ReaderBottomBar(
 
                 Spacer(Modifier.weight(1f))
 
+                // Automatic reading. In the action row rather than the settings
+                // panel because it is a *mode you read in*, not a preference: it
+                // is switched on when the reader's hands are busy, and off the
+                // moment they pick the phone up.
+                IconButton(onClick = onToggleAutoRead) {
+                    Icon(
+                        imageVector = if (state.autoRead) Icons.Filled.Pause
+                        else Icons.Filled.PlayArrow,
+                        contentDescription = if (state.autoRead) "暂停自动阅读" else "自动阅读",
+                        tint = if (state.autoRead) skin.accent else skin.text,
+                    )
+                }
+
                 if (hasChapters) {
                     IconButton(
                         onClick = onNextChapter,
@@ -1126,6 +1356,38 @@ private fun ReaderBottomBar(
                             contentDescription = "下一章",
                             tint = if (state.chapterIndex + 1 < state.chapters.size) skin.text
                             else skin.secondaryText.copy(alpha = 0.4f),
+                        )
+                    }
+                }
+            }
+
+            /**
+             * What the reader is waiting for, if anything.
+             *
+             * Two different waits, and saying which one it is matters: online
+             * reading opens on a prefix and fetches the rest behind it, so the
+             * honest message is that the book is readable *now* and still
+             * arriving. An automatic page turn is a deliberate pause, so it is
+             * shown as a countdown rather than as a spinner.
+             */
+            if (state.finishing || state.autoRead) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = 10.dp, end = 10.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    when {
+                        state.autoRead -> Text(
+                            "自动阅读中 · ${AutoRead.label(autoReadSeconds)}",
+                            color = skin.accent,
+                            fontSize = 10.sp,
+                        )
+
+                        else -> Text(
+                            "正在后台下载剩余内容，可以先读这一部分",
+                            color = skin.secondaryText,
+                            fontSize = 10.sp,
                         )
                     }
                 }

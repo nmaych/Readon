@@ -300,7 +300,14 @@ fun HomeScreen(
                                     book = book,
                                     isDownloaded = book.id in downloaded,
                                     download = download,
-                                    onOpen = { onOpen(book) },
+                                    // Hand the reader the shelf's own record when
+                                    // the book is already on the device. The
+                                    // listing's entry has no `localFile`, so
+                                    // passing it through would send the reader to
+                                    // the network for a file it already has --
+                                    // and write a second copy of it into the
+                                    // online cache on the way.
+                                    onOpen = { onOpen(library.openable(book)) },
                                     onDownload = {
                                         // Runs at application scope, so navigating
                                         // away no longer kills the transfer.

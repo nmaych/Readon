@@ -84,6 +84,7 @@ import com.readon.reader.data.ReadingMode
 import com.readon.reader.data.formatSize
 import com.readon.reader.net.ListSource
 import com.readon.reader.net.Mirror
+import com.readon.reader.reader.AutoRead
 import com.readon.reader.ui.collectAsStateSafe
 import com.readon.reader.ui.theme.ReaderFont
 import com.readon.reader.ui.theme.ReaderPalette
@@ -333,6 +334,42 @@ fun SettingsScreen(
                         title = "阅读时保持屏幕常亮",
                         checked = snapshot.keepScreenOn,
                         onCheckedChange = { prefs.keepScreenOn = it },
+                    )
+
+                    HorizontalDivider(Modifier.padding(vertical = 10.dp))
+
+                    // --- automatic reading ---------------------------------
+                    //
+                    // Two controls, because they are two different things: the
+                    // switch is "a newly opened book starts reading itself", and
+                    // the slider is how long each page stays. The reader's own
+                    // play button writes the same switch, so turning it on while
+                    // reading is remembered here rather than having to be set
+                    // twice.
+                    SwitchRow(
+                        title = "自动阅读",
+                        subtitle = "打开书后自动翻页；阅读界面下方也有开关",
+                        checked = snapshot.autoReadEnabled,
+                        onCheckedChange = { prefs.autoReadEnabled = it },
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    SettingRow(
+                        title = "翻页间隔",
+                        subtitle = AutoRead.label(snapshot.autoReadSeconds),
+                    ) {
+                        Slider(
+                            value = snapshot.autoReadSeconds.toFloat(),
+                            onValueChange = { prefs.autoReadSeconds = it.toInt() },
+                            valueRange = AutoRead.MIN_SECONDS.toFloat()..AutoRead.MAX_SECONDS.toFloat(),
+                            steps = 10,
+                            modifier = Modifier.width(160.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "到最后一页会自动停止，不会翻回开头；点一下正文也会暂停。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -821,6 +858,8 @@ private data class SettingsSnapshot(
     val lineSpacing: Float,
     val serif: Boolean,
     val keepScreenOn: Boolean,
+    val autoReadEnabled: Boolean,
+    val autoReadSeconds: Int,
     val themeMode: Int,
     val autoCheckUpdates: Boolean,
     val updateOwner: String,
@@ -854,6 +893,8 @@ private data class SettingsSnapshot(
                 lineSpacing = p.lineSpacing,
                 serif = p.serif,
                 keepScreenOn = p.keepScreenOn,
+                autoReadEnabled = p.autoReadEnabled,
+                autoReadSeconds = p.autoReadSeconds,
                 themeMode = p.themeMode,
                 autoCheckUpdates = p.autoCheckUpdates,
                 updateOwner = p.updateOwner,
