@@ -81,8 +81,8 @@ git push -u origin main
 `app-project/app/build.gradle.kts`：
 
 ```kotlin
-val appVersionCode: Int = (System.getenv("READON_VERSION_CODE") ?: "10006").toIntOrNull()
-val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.6"
+val appVersionCode: Int = (System.getenv("READON_VERSION_CODE") ?: "10007").toIntOrNull()
+val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.7"
 ```
 
 `versionCode` 的算法是 `major*10000 + minor*100 + patch`：
@@ -96,6 +96,7 @@ val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.6"
 | 1.0.4 | 10004 |
 | 1.0.5 | 10005 |
 | 1.0.6 | 10006 |
+| 1.0.7 | 10007 |
 | 1.1.0 | 10100 |
 | 2.0.0 | 20000 |
 
@@ -122,8 +123,8 @@ val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.6"
 
 ```powershell
 build.cmd assembleRelease
-copy app-project\app\build\outputs\apk\release\app-release.apk dist\readon-1.0.6.apk
-python tools\ci_release.py --name 1.0.6 --apk dist\readon-1.0.6.apk
+copy app-project\app\build\outputs\apk\release\app-release.apk dist\readon-1.0.7.apk
+python tools\ci_release.py --name 1.0.7 --apk dist\readon-1.0.7.apk
 check.cmd
 ```
 
@@ -139,7 +140,7 @@ check.cmd
 - `.gitignore` 排除了 `keystore.properties`、`*.jks`、`local.properties`
 - `.gitignore` 里 `*.jar` 规则有 `!gradle/wrapper/gradle-wrapper.jar` 例外（少了它，克隆下来无法构建）
 - Gradle wrapper 三个文件齐全
-- 书籍逻辑：编码检测（UTF-8 / GBK / UTF-16 / BOM / ASCII 开头 + GBK 正文）、章节切分、分页游标（首页不能对着空列表取 `last()`，以及章末空行不再产生空白页）、滚动分段、阅读配色对比度、书签、在线阅读缓存的命中判定与 LRU 淘汰、**自动阅读的夹紧规则**（0 秒 / 负数 / 超大值都落到 3–60 秒）、**部分下载的判定**（`Content-Range` 解析、「大小未知时不敢断言完整」、只去掉末尾那一个替换字符），更新检查两个来源的合并规则（过期清单不得谎报「已是最新」），与书架标签的日期边界
+- 书籍逻辑：编码检测（UTF-8 / GBK / UTF-16 / BOM / ASCII 开头 + GBK 正文）、章节切分、分页游标（首页不能对着空列表取 `last()`，以及章末空行不再产生空白页）、滚动分段、阅读配色对比度、书签、在线阅读缓存的命中判定与 LRU 淘汰、**自动阅读的夹紧规则**（0 秒 / 负数 / 超大值都落到 3–60 秒）与**滚动模式的缓慢滑动**（滑动时长必须等于间隔，默认速度 < 100 dp/s）、**更新说明的 Markdown 解析**（含用真实 `dist/update.json` 断言列表项不丢失）、**部分下载的判定**（`Content-Range` 解析、「大小未知时不敢断言完整」、只去掉末尾那一个替换字符），更新检查两个来源的合并规则（过期清单不得谎报「已是最新」），与书架标签的日期边界
 - 发布产物自洽：`dist/update.json` 的 `sha256` 与 `dist/readon-<版本>.apk` **实际**
   一致，`versionCode` 算术正确，`apkUrl` 指向存在的文件名，说明与 CHANGELOG 章节逐字相同
 
@@ -154,10 +155,10 @@ check.cmd
 
 ```powershell
 git add -A
-git commit -m "chore(release): 1.0.6"
+git commit -m "chore(release): 1.0.7"
 git push
-git tag v1.0.6
-git push origin v1.0.6
+git tag v1.0.7
+git push origin v1.0.7
 ```
 
 ### 4. 之后自动发生的事

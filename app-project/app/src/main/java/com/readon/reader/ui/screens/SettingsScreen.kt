@@ -20,8 +20,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
@@ -79,6 +81,7 @@ import com.readon.reader.BuildConfig
 import com.readon.reader.ReadonApp
 import com.readon.reader.data.Prefs
 import com.readon.reader.data.LibrarySource
+import com.readon.reader.data.Markdown
 import com.readon.reader.data.ReaderInk
 import com.readon.reader.data.ReadingMode
 import com.readon.reader.data.formatSize
@@ -86,6 +89,7 @@ import com.readon.reader.net.ListSource
 import com.readon.reader.net.Mirror
 import com.readon.reader.reader.AutoRead
 import com.readon.reader.ui.collectAsStateSafe
+import com.readon.reader.ui.components.MarkdownView
 import com.readon.reader.ui.theme.ReaderFont
 import com.readon.reader.ui.theme.ReaderPalette
 import com.readon.reader.ui.theme.ReaderTheme
@@ -117,6 +121,11 @@ fun SettingsScreen(
     var showLibraryEditor by remember { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
+
+    // The full release notes, shown when the card's preview is not enough. Held
+    // here rather than inside the card so the dialog is not clipped by the card's
+    // own bounds.
+    var showNotes by remember { mutableStateOf(false) }
 
     var cachedBytes by remember { mutableStateOf(0L) }
     var onlineCacheBytes by remember { mutableStateOf(0L) }
@@ -191,6 +200,8 @@ fun SettingsScreen(
                     onInstall = { _, file -> app.updates.install(file) },
                     onIgnore = { available -> app.updateCenter.ignore(available) },
                     onOpenReleases = { openUrl(context, ReadonLinks.RELEASES, toast) },
+                    onShowNotes = { showNotes = true },
+                    onOpenLink = { openUrl(context, it, toast) },
                 )
             }
 
@@ -696,8 +707,9 @@ fun SettingsScreen(
     // focused, but this covers the case where one is open and focus has moved on
     // -- and it makes "back always closes the topmost thing" true everywhere
     // rather than almost everywhere.
-    BackHandler(enabled = showLibraryEditor || showClearConfirm || showAbout) {
+    BackHandler(enabled = showLibraryEditor || showClearConfirm || showAbout || showNotes) {
         when {
+            showNotes -> showNotes = false
             showAbout -> showAbout = false
             showClearConfirm -> showClearConfirm = false
             showLibraryEditor -> showLibraryEditor = false
@@ -770,7 +782,48 @@ fun SettingsScreen(
             },
         )
     }
+
+    // The full release notes. A dialog rather than a longer card because the
+    // notes for a release like 1.0.6 run to several thousand characters, and a
+    // card that tall would bury the download button and the rest of Settings.
+    val available = (updateState as? UpdateCenter.State.Available)?.info
+    if (showNotes && available != null) {
+        AlertDialog(
+            onDismissRequest = { showNotes = false },
+            title = { Text("更新内容 · ${available.versionName}") },
+            text = {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    MarkdownView(
+                        markdown = available.notes,
+                        textColor = MaterialTheme.colorScheme.onSurface,
+                        secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        accentColor = MaterialTheme.colorScheme.primary,
+                        linkColor = MaterialTheme.colorScheme.primary,
+                        baseSize = 13.sp,
+                        onLink = { openUrl(context, it, toast) },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showNotes = false }) { Text("好") }
+            },
+        )
+    }
 }
+
+/**
+ * How many blocks of the release notes the update card shows before deferring to
+ * the dialog.
+ *
+ * Enough to say what kind of release this is -- a heading, a paragraph and the
+ * first couple of bullets -- and few enough that the card does not push the
+ * download button off the screen.
+ */
+private const val NOTES_PREVIEW_BLOCKS = 6
 
 /** State of the "test the routes" action. */
 private sealed interface ProbeState {
@@ -921,6 +974,8 @@ private fun UpdateCard(
     onInstall: (UpdateResult.Available, java.io.File) -> Unit,
     onIgnore: (UpdateResult.Available) -> Unit,
     onOpenReleases: () -> Unit,
+    onShowNotes: () -> Unit,
+    onOpenLink: (String) -> Unit,
 ) {
     val (accent, title, body) = when (state) {
         is UpdateCenter.State.Idle -> Triple(
@@ -948,8 +1003,11 @@ private fun UpdateCard(
         is UpdateCenter.State.Available -> Triple(
             MaterialTheme.colorScheme.secondary,
             "发现新版本 ${state.info.versionName}",
-            state.info.notes.lineSequence().firstOrNull { it.isNotBlank() }
-                ?.take(90) ?: "点击下载并安装。",
+            // A sentence, not a fragment of markup: the card used to cut the
+            // notes' first line at 90 characters, so what the user saw was
+            // "### Added" or a bullet ending in "**". The notes are Markdown and
+            // are rendered as such below; this line is the summary.
+            Markdown.summary(state.info.notes, 100).ifBlank { "点击下载并安装。" },
         )
         is UpdateCenter.State.Downloading -> Triple(
             MaterialTheme.colorScheme.primary, "正在下载更新…", "",
@@ -1015,12 +1073,30 @@ private fun UpdateCard(
                 }
 
                 is UpdateCenter.State.Available -> {
+                    Spacer(Modifier.height(10.dp))
+                    // The notes, as Markdown. Truncated to a few blocks so the
+                    // card stays a card; the full text is one tap away.
+                    MarkdownView(
+                        markdown = state.info.notes,
+                        textColor = MaterialTheme.colorScheme.onSurface,
+                        secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        accentColor = accent,
+                        linkColor = MaterialTheme.colorScheme.primary,
+                        baseSize = 12.sp,
+                        maxBlocks = NOTES_PREVIEW_BLOCKS,
+                        onLink = onOpenLink,
+                    )
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = { onDownload(state.info) }) {
                             Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
                             Text("下载更新")
+                        }
+                        if (state.info.notes.isNotBlank()) {
+                            OutlinedButton(onClick = onShowNotes) {
+                                Text("更新内容")
+                            }
                         }
                         OutlinedButton(onClick = { onIgnore(state.info) }) {
                             Text("忽略此版本")

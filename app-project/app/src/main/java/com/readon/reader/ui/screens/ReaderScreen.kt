@@ -3,6 +3,7 @@ package com.readon.reader.ui.screens
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -30,6 +32,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -94,6 +97,8 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.readon.reader.ReadonApp
 import com.readon.reader.data.Book
 import com.readon.reader.data.BookContent
@@ -288,6 +293,52 @@ fun ReaderScreen(
         }
     }
 
+    /**
+     * Take the system navigation bar out of the way for as long as the book is
+     * open.
+     *
+     * While a book is open the bottom of the screen is the reader's: the body text
+     * runs to the edge, the footer is drawn over it, and a bar of system buttons
+     * sitting under a page of prose is both a distraction and a strip of screen
+     * the text cannot use. It is hidden for the whole visit and **restored on
+     * dispose** -- leaving the reader with the bar still gone would take the app's
+     * navigation away from every other screen.
+     *
+     * The behaviour is [WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE]
+     * rather than a hard hide: a reader who needs the bar can still get it back by
+     * swiping, and it slides away again on its own. A permanent hide with no way
+     * out would make the app's own back gesture unreachable for anyone who does
+     * not know the edge-swipe, which is a worse trade than a bar that reappears
+     * when asked for.
+     *
+     * Keyed on `book.id` and **not** on the reader theme, unlike the icon tints
+     * above: the system can restore the bars on its own (returning from the
+     * installer, a configuration change), so this has to be re-applied per book --
+     * but a theme change happens *while* the reader is sitting there, and keying
+     * on it would show the bar and hide it again, a visible flicker, every time
+     * the reader switched between 纸白 and 夜间.
+     */
+    DisposableEffect(book.id) {
+        val window = (context as? android.app.Activity)?.window
+        val view = window?.decorView
+        if (window == null || view == null) {
+            onDispose { }
+        } else {
+            val controller = WindowCompat.getInsetsController(window, view)
+            val previousBehavior = controller.systemBarsBehavior
+            // Hide the navigation bar only, never the status bar: the clock and the
+            // battery are how a reader knows how long they have been reading, and
+            // the top inset is sized for a visible status bar.
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.navigationBars())
+            onDispose {
+                controller.systemBarsBehavior = previousBehavior
+                controller.show(WindowInsetsCompat.Type.navigationBars())
+            }
+        }
+    }
+
     val textStyle = remember(fontSize, lineSpacing, font, skin) {
         TextStyle(
             fontSize = fontSize.sp,
@@ -407,12 +458,24 @@ private fun ReaderBody(
      * keying it on the chrome would make the text jump by a line every time the
      * toolbar was toggled.
      *
-     * One extra blank line's worth is added on top of the status bar so the first
-     * line of a page is not flush against the clock either.
+     * Two things make this robust rather than approximate:
+     *
+     *   * The clearance is the **union of the status bar and the display cutout**,
+     *     not the status bar alone. On a device with a notch or a punch-hole the
+     *     cutout can extend past the status bar -- in landscape it usually does --
+     *     and taking only the status bar leaves the first line under the camera.
+     *   * The blank line is **one real line of body text**, derived from the
+     *     reader's own font size and line spacing rather than a fixed 14 dp. The
+     *     promise is "one blank line", and at 30 sp text a fixed 14 dp is less
+     *     than half of one.
      */
     val topInset = with(density) {
-        val statusBar = WindowInsets.statusBars.getTop(this).toDp()
-        statusBar + BLANK_LINE_DP
+        val system = WindowInsets.statusBars
+            .union(WindowInsets.displayCutout)
+            .getTop(this)
+            .toDp()
+        val blankLine = (fontSize * lineSpacing).sp.toDp()
+        system + maxOf(blankLine, MIN_TOP_BLANK)
     }
 
     /**
@@ -990,7 +1053,7 @@ private fun ScrollReader(
     }
 
     /**
-     * Automatic reading in scrolling mode.
+     * Automatic reading in scrolling mode: a slow, continuous slide.
      *
      * "One page" here is one screenful, which is what the mode's unit of reading
      * is -- there are no pages to turn. The loop rather than a keyed
@@ -998,29 +1061,50 @@ private fun ScrollReader(
      * index as it passes block boundaries, and keying on that would cancel the
      * animation half-way through and start the wait over.
      *
-     * The wait is measured *after* the scroll finishes, so the reader gets the
-     * full interval looking at a settled screen rather than a moving one.
+     * ## Why the movement takes the whole interval
+     *
+     * The first version waited out the interval and *then* scrolled a screenful in
+     * 700 ms. That is not automatic scrolling, it is an automatic page turn with a
+     * transition: the screen sits perfectly still for 14 of every 15 seconds and
+     * then lurches a full screenful in under one. Reported as "自动阅读滑动模式
+     * 改为缓慢滑动" -- and the complaint is fair, because the setting says 15 秒
+     * while the actual movement takes seven tenths of a second.
+     *
+     * Now the scroll *is* the interval. [AutoRead.scrollDurationMillis] is the same
+     * 15 seconds, so the average speed is unchanged (still one screenful per
+     * interval, which is what the interval means) but the text crawls the whole
+     * time instead of jumping. [LinearEasing] rather than the default curve is
+     * load-bearing: an ease-in-out on a 15-second animation would start almost
+     * imperceptibly slowly and finish with a visible rush, which is the lurch this
+     * is meant to remove.
      */
     LaunchedEffect(state.autoRead, autoReadSeconds, blocks, state.contentGeneration) {
         val ready = blocks ?: return@LaunchedEffect
         if (ready.isEmpty()) return@LaunchedEffect
         while (state.autoRead) {
-            delay(AutoRead.delayMillis(autoReadSeconds))
-            if (!state.autoRead) break
             val viewport = listState.layoutInfo.viewportSize.height
-            // A little less than a full screenful, so the first line of the next
-            // screen is one the reader has already seen and the text does not
-            // appear to jump.
-            val step = viewport * 0.92f
-            if (step <= 0f) continue
+            if (viewport <= 0) {
+                // The column has not been measured yet. Waiting a frame is the
+                // honest answer; scrolling by zero and looping would spin.
+                delay(FRAME_MS)
+                continue
+            }
+            val step = viewport * AutoRead.SCROLL_FRACTION
             val before = listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
-            listState.animateScrollBy(step, tween(SCROLL_STEP_MS))
+            listState.animateScrollBy(
+                value = step,
+                animationSpec = tween(
+                    durationMillis = AutoRead.scrollDurationMillis(autoReadSeconds).toInt(),
+                    easing = LinearEasing,
+                ),
+            )
+            if (!state.autoRead) break
             val after = listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
             if (after == before) {
                 // The bottom of what is on the device. While the rest of the book
                 // is still arriving that is not the end of anything, so the loop
-                // keeps waiting; the effect is restarted by `contentGeneration`
-                // when the full text lands.
+                // waits rather than stopping; the effect is restarted by
+                // `contentGeneration` when the full text lands.
                 if (state.partial) {
                     delay(AutoRead.delayMillis(autoReadSeconds))
                     continue
@@ -1071,9 +1155,15 @@ private fun ScrollReader(
             // Top: the status-bar inset plus one blank line, so the first
             // paragraph is never under the phone's own clock and battery, and the
             // top bar's own height (~60 dp of content) on top of that. Bottom: the
-            // progress bar, the position row and the action row (~74 dp), plus the
-            // navigation-bar inset the reader draws under because it is
-            // edge-to-edge.
+            // progress bar, the position row and the action row (~74 dp), plus
+            // room for the system navigation bar.
+            //
+            // The navigation-bar inset is not read here even though the reader is
+            // edge-to-edge: it hides that bar for the whole visit (see the
+            // `DisposableEffect` in `ReaderScreen`), so its inset is zero while
+            // this column is on screen and reading it would reserve space for a
+            // bar that is not there. The allowance stays a constant so the last
+            // paragraph still clears the reader's own footer.
             contentPadding = PaddingValues(
                 start = horizontalPadding,
                 end = horizontalPadding,
@@ -1105,17 +1195,23 @@ private fun ScrollReader(
 private const val SENTINEL_LAST_PAGE = Int.MAX_VALUE / 2
 
 /**
- * The blank line kept above the body text, on top of the status-bar inset.
+ * The floor under the blank line kept above the body text.
  *
- * The reader is edge-to-edge, so without this the first line of a page sits
- * directly under the phone's clock and battery. One line's worth of leading is
- * enough to read as a margin rather than as a mistake, and small enough that a
- * page does not visibly lose a line of text.
+ * The blank line is normally one line of body text (see `topInset`), which scales
+ * with the reader's font size. This is the floor for the case where that would be
+ * too little to read as a margin at all -- the smallest font size the reader
+ * offers is 12 sp, and a page whose first line is a hair under the status bar
+ * looks like a layout mistake rather than a margin.
  */
-private val BLANK_LINE_DP = 14.dp
+private val MIN_TOP_BLANK = 14.dp
 
-/** How long one automatic scroll step takes in scrolling mode. */
-private const val SCROLL_STEP_MS = 700
+/**
+ * One frame, for the wait when the column has not been measured yet.
+ *
+ * Long enough that the loop is not a spin, short enough that the first automatic
+ * step is not visibly late.
+ */
+private const val FRAME_MS = 16L
 
 /**
  * The reader's top bar.

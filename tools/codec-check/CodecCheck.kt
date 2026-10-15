@@ -1,5 +1,7 @@
 package com.readon.reader.data
 
+import com.google.gson.JsonParser
+import com.readon.reader.data.Markdown
 import com.readon.reader.data.PartialRead
 import com.readon.reader.reader.AutoRead
 import com.readon.reader.reader.PageCursor
@@ -9,6 +11,18 @@ import com.readon.reader.update.UpdateResult
 import java.io.File
 import java.util.Calendar
 import java.util.TimeZone
+
+/**
+ * The repository root, passed in by `tools/check-book-logic.cmd`.
+ *
+ * A property rather than a relative path: the harness is run from wherever the
+ * caller happens to be standing, and resolving `dist/update.json` against the
+ * process's working directory would either find the wrong file or silently find
+ * nothing and skip the check that uses it.
+ */
+private val ROOT_OF_REPO: File = File(
+    System.getProperty("readon.repoRoot") ?: ".",
+)
 
 /**
  * Verification harness for the pure-JVM logic the bug reports touch: encoding
@@ -1086,6 +1100,348 @@ fun main() {
     // could promise "3 秒" while the reader waits something else.
     check("标签显示夹紧后的秒数", AutoRead.label(0) == "${AutoRead.MIN_SECONDS} 秒/页", AutoRead.label(0))
     check("标签显示原值（在范围内）", AutoRead.label(20) == "20 秒/页", AutoRead.label(20))
+
+    // --- the scrolling mode's step ------------------------------------------
+    //
+    // 1.0.7 replaced "wait out the interval, then jump a screenful in 700 ms" with
+    // a continuous slide that spends the whole interval moving. The property that
+    // makes it *slow* is that the duration is the interval, so these pin it: a
+    // regression back to a fixed short animation would show up here as a duration
+    // that no longer tracks the setting.
+    check(
+        "滚动时长等于间隔（整段都在动）",
+        AutoRead.scrollDurationMillis(15) == AutoRead.delayMillis(15),
+        "${AutoRead.scrollDurationMillis(15)}",
+    )
+    check(
+        "间隔越长滑动越慢",
+        AutoRead.scrollDurationMillis(30) > AutoRead.scrollDurationMillis(5),
+    )
+    check(
+        "滚动时长同样被夹紧",
+        AutoRead.scrollDurationMillis(0) == AutoRead.MIN_SECONDS * 1000L,
+        "${AutoRead.scrollDurationMillis(0)}",
+    )
+    check(
+        "滚动时长总是正的",
+        listOf(-1, 0, 1, 3, 15, 60, 9999).all { AutoRead.scrollDurationMillis(it) > 0L },
+    )
+    check(
+        "一步不满一屏（下一屏首行是刚看过的）",
+        AutoRead.SCROLL_FRACTION > 0f && AutoRead.SCROLL_FRACTION < 1f,
+        "${AutoRead.SCROLL_FRACTION}",
+    )
+    // The claim being made is "缓慢滑动", so the speed is asserted rather than
+    // asserted-about: on a 800 dp viewport the default interval has to stay under
+    // 100 dp/s, where the old 700 ms step was over 1000.
+    val speed = AutoRead.scrollSpeedDpPerSecond(AutoRead.DEFAULT_SECONDS, 800f)
+    check("默认速度是缓慢的（< 100 dp/s）", speed < 100f, "${speed} dp/s")
+    check(
+        "旧行为的速度会远超上限（证明这个检查有意义）",
+        800f * AutoRead.SCROLL_FRACTION / 0.7f > 1000f,
+        "${800f * AutoRead.SCROLL_FRACTION / 0.7f} dp/s",
+    )
+    check(
+        "速度随间隔变慢",
+        AutoRead.scrollSpeedDpPerSecond(30, 800f) < AutoRead.scrollSpeedDpPerSecond(10, 800f),
+    )
+
+    println()
+    println("== 更新说明的 Markdown 渲染 ==")
+
+    // The update card used to show the notes' first line cut at 90 characters, so
+    // what a user deciding whether to install saw was "### Added" or a bullet
+    // ending in "**". These pin the parse that replaced it.
+    val notes = """
+        ### Added
+
+        - **自动阅读。** 阅读界面下方新增一个开关，打开后按设定的间隔自动翻页。
+
+          - 子项一。
+          - 子项二。
+
+        ### Fixed
+
+        - 修掉 `Content-Range` 的解析问题。
+        - 支持 [链接](https://example.com/notes) 与 ~~删除线~~。
+
+        1. 第一步
+        2. 第二步
+
+        > 引用一行。
+
+        ---
+
+        ```kotlin
+        val x = 1
+        ```
+    """.trimIndent()
+
+    val blocks = Markdown.parse(notes)
+
+    fun headings() = blocks.filterIsInstance<Markdown.Block.Heading>()
+    check("识别标题", headings().size == 2, "${headings().size}")
+    check("标题级别正确", headings().all { it.level == 3 }, headings().joinToString { "${it.level}" })
+    check("标题文本去掉了井号", headings().first().text == "Added", headings().first().text)
+
+    val bullets = blocks.filterIsInstance<Markdown.Block.Bullet>()
+    // One under Added, two nested under it, two under Fixed.
+    check("识别无序列表", bullets.size == 5, "${bullets.size}")
+    check("列表项文本正确", bullets.first().text.startsWith("**自动阅读。**"), bullets.first().text)
+    check(
+        "缩进的子项有深度",
+        bullets.count { it.depth == 1 } == 2,
+        bullets.joinToString { "${it.depth}:${it.text}" },
+    )
+    check("顶层项深度为 0", bullets.first().depth == 0, "${bullets.first().depth}")
+
+    val numbered = blocks.filterIsInstance<Markdown.Block.Numbered>()
+    check("识别有序列表", numbered.size == 2, "${numbered.size}")
+    check("保留原有序号", numbered.map { it.marker } == listOf("1.", "2."), numbered.joinToString { it.marker })
+
+    check("识别引用", blocks.any { it is Markdown.Block.Quote })
+    check("识别分隔线", blocks.any { it is Markdown.Block.Divider })
+
+    val code = blocks.filterIsInstance<Markdown.Block.Code>()
+    check("识别围栏代码块", code.size == 1, "${code.size}")
+    check("代码内容原样保留", code.first().text.trim() == "val x = 1", code.first().text)
+    check("代码块语言被记录", code.first().language == "kotlin", "${code.first().language}")
+
+    // A paragraph must be one block even though the source wraps it across lines:
+    // the changelog wraps at 80 columns, and a block per source line would put a
+    // gap in the middle of every sentence.
+    val wrappedBlocks = Markdown.parse("这是第一行，\n这是第二行，\n这是第三行。")
+    check("软换行合并为一个段落", wrappedBlocks.size == 1, "${wrappedBlocks.size}")
+    check(
+        "软换行以空格连接",
+        (wrappedBlocks.first() as Markdown.Block.Paragraph).text == "这是第一行， 这是第二行， 这是第三行。",
+        (wrappedBlocks.first() as Markdown.Block.Paragraph).text,
+    )
+
+    // A list item owns its indented continuation lines. The changelog wraps its
+    // bullets at 80 columns and indents the overflow by two spaces -- 51 such
+    // lines in the 1.0.6 section alone -- so a parser that treats them as ordinary
+    // paragraphs cuts every bullet off at its first line and floats the rest of
+    // the sentence below it. The text is all still on screen, which is exactly
+    // what makes this survive a glance at the UI.
+    val wrappedItem = Markdown.parse(
+        "- **粗体开头。** 这一条很长，\n" +
+            "  于是折到了第二行，\n" +
+            "  甚至第三行。\n" +
+            "- 下一条。\n"
+    )
+    check("折行的列表项仍是一项", wrappedItem.count { it is Markdown.Block.Bullet } == 2, "${wrappedItem.size} 块")
+    check(
+        "折行内容被并入同一项",
+        (wrappedItem.first() as Markdown.Block.Bullet).text ==
+            "**粗体开头。** 这一条很长， 于是折到了第二行， 甚至第三行。",
+        (wrappedItem.first() as Markdown.Block.Bullet).text,
+    )
+    check("续行不会变成独立段落", wrappedItem.none { it is Markdown.Block.Paragraph })
+
+    // A nested item is its own item, not prose belonging to its parent.
+    val nestedList = Markdown.parse("- 父项。\n  - 子项一。\n  - 子项二。\n- 下一个父项。\n")
+    check("嵌套列表不被并入父项", nestedList.count { it is Markdown.Block.Bullet } == 4, "${nestedList.size}")
+    check("父项文本不被子项污染", (nestedList.first() as Markdown.Block.Bullet).text == "父项。")
+    check("子项深度为 1", (nestedList[1] as Markdown.Block.Bullet).depth == 1)
+
+    // A blank line inside an item joins it; a blank line followed by a
+    // *less*-indented line ends it.
+    val itemWithGap = Markdown.parse("- 第一句。\n\n  第二句仍在同一条里。\n")
+    check("空行后更深的缩进仍属同一项", itemWithGap.size == 1, "${itemWithGap.size}")
+    check(
+        "空行不切断同一项",
+        (itemWithGap.first() as Markdown.Block.Bullet).text == "第一句。 第二句仍在同一条里。",
+        (itemWithGap.first() as Markdown.Block.Bullet).text,
+    )
+    val itemThenPara = Markdown.parse("- 一项。\n\n普通段落。\n")
+    check("空行后无缩进则列表结束", itemThenPara.count { it is Markdown.Block.Bullet } == 1)
+    check("结束后的段落是独立段落", itemThenPara.any { it is Markdown.Block.Paragraph })
+
+    // A heading or a fence under an item is a new block, not the item's prose.
+    val itemThenHeading = Markdown.parse("- 一项。\n  ### 小标题\n")
+    check("列表项后的标题不被并入", itemThenHeading.any { it is Markdown.Block.Heading })
+    check(
+        "列表项在标题前结束",
+        (itemThenHeading.first() as Markdown.Block.Bullet).text == "一项。",
+        (itemThenHeading.first() as Markdown.Block.Bullet).text,
+    )
+
+    // --- inline --------------------------------------------------------------
+    fun plain(spans: List<Markdown.Span>): String = spans.joinToString("") { s ->
+        when (s) {
+            is Markdown.Span.Text -> s.text
+            is Markdown.Span.Code -> s.text
+            is Markdown.Span.Styled -> plain(s.spans)
+            is Markdown.Span.Link -> plain(s.spans)
+        }
+    }
+
+    check("粗体被识别", Markdown.inline("**粗**").any { it is Markdown.Span.Styled })
+    check("斜体被识别", Markdown.inline("*斜*").any { it is Markdown.Span.Styled })
+    check(
+        "删除线被识别",
+        Markdown.inline("~~删~~").any {
+            it is Markdown.Span.Styled && it.style == Markdown.Style.Strikethrough
+        },
+    )
+    check(
+        "粗体样式正确",
+        (Markdown.inline("**粗**").first() as Markdown.Span.Styled).style == Markdown.Style.Bold,
+    )
+    // Two-character delimiters must win, or `**bold**` reads as an italic `*`
+    // immediately followed by another.
+    check("双星号不会被当成斜体", Markdown.inline("**粗**").size == 1, "${Markdown.inline("**粗**").size}")
+
+    val codeSpan = Markdown.inline("`Content-Range`")
+    check("行内代码被识别", codeSpan.size == 1 && codeSpan.first() is Markdown.Span.Code)
+    // A code span suppresses every other marker, which is what makes
+    // `` `**` `` render as the two characters it is.
+    val suppressed = Markdown.inline("`**`")
+    check(
+        "代码里的标记不被解析",
+        suppressed.size == 1 && (suppressed.first() as Markdown.Span.Code).text == "**",
+        plain(suppressed),
+    )
+
+    val link = Markdown.inline("见 [说明](https://example.com/x) 一节")
+    val linkSpan = link.filterIsInstance<Markdown.Span.Link>().firstOrNull()
+    check("链接被识别", linkSpan != null)
+    check("链接地址正确", linkSpan?.url == "https://example.com/x", "${linkSpan?.url}")
+    check("链接文字正确", linkSpan?.let { plain(it.spans) } == "说明", linkSpan?.let { plain(it.spans) } ?: "null")
+
+    // Unclosed and empty markers are not emphasis: swallowing them would delete
+    // the user's text, and showing them is the honest failure.
+    check("未闭合的星号保留为文本", plain(Markdown.inline("**没闭合")) == "**没闭合", plain(Markdown.inline("**没闭合")))
+    check("空的星号保留为文本", plain(Markdown.inline("****")) == "****", plain(Markdown.inline("****")))
+    check("普通文本不被改动", plain(Markdown.inline("普通文本。")) == "普通文本。")
+    check("空字符串不崩溃", Markdown.inline("").isEmpty())
+    check("空文档解析为空", Markdown.parse("").isEmpty())
+
+    // Nested styling is what the changelog actually writes:
+    // `**`Content-Range` 的解析**` -- a code span inside a bold run.
+    val nested = Markdown.inline("**`Content-Range` 的解析**")
+    check("粗体里可以嵌代码", nested.size == 1 && nested.first() is Markdown.Span.Styled)
+    check(
+        "嵌套内容完整",
+        plain(nested) == "Content-Range 的解析",
+        plain(nested),
+    )
+
+    // The summary line on the card has to be prose, not markup: showing the raw
+    // "### Added" was the bug.
+    val summary = Markdown.summary(notes, 40)
+    check("摘要不含 Markdown 标记", !summary.contains("###") && !summary.contains("**"), summary)
+    check("摘要被截断到上限", summary.length <= 41, "${summary.length}: $summary")
+    check("摘要以省略号结尾", summary.endsWith("…"), summary)
+    check(
+        "短说明不加省略号",
+        Markdown.summary("简短说明。", 100) == "简短说明。",
+        Markdown.summary("简短说明。", 100),
+    )
+    check("摘要保留中文", Markdown.summary(notes, 100).any { it in '\u4e00'..'\u9fff' })
+
+    // The notes the app actually ships must survive the parse: this is the real
+    // section from dist/update.json, read back through the same JSON parser the
+    // app uses. A regex over the manifest would be both fragile and a
+    // catastrophic-backtracking hazard on a multi-kilobyte string.
+    val realNotes = File(ROOT_OF_REPO, "dist/update.json").takeIf { it.exists() }?.let { f ->
+        runCatching {
+            JsonParser.parseString(f.readText(Charsets.UTF_8))
+                .asJsonObject
+                .get("notes")
+                ?.asString
+        }.getOrNull()
+    }
+    if (realNotes.isNullOrBlank()) {
+        println("  [skip] dist/update.json 的说明未读到，跳过真实说明的解析检查")
+    } else {
+        val realBlocks = Markdown.parse(realNotes)
+        check("真实更新说明能解析出内容", realBlocks.isNotEmpty(), "${realBlocks.size}")
+        check(
+            "真实更新说明的标题被识别",
+            realBlocks.any { it is Markdown.Block.Heading },
+            realBlocks.take(3).joinToString { it::class.simpleName ?: "?" },
+        )
+        check(
+            "真实更新说明的列表被识别",
+            realBlocks.any { it is Markdown.Block.Bullet },
+        )
+        // Nothing may be silently dropped: the headings the release is organised
+        // under have to come through, or the notes the user reads are shorter than
+        // the release's own description.
+        val headingTexts = realBlocks.filterIsInstance<Markdown.Block.Heading>().map { it.text }
+        check(
+            "真实更新说明的 Added/Fixed 章节都在",
+            headingTexts.contains("Added") && headingTexts.contains("Fixed"),
+            headingTexts.joinToString(),
+        )
+        val realSummary = Markdown.summary(realNotes, 100)
+        check(
+            "真实更新说明的摘要可读（不是标记）",
+            !realSummary.startsWith("#") && realSummary.isNotBlank(),
+            realSummary,
+        )
+        // Every bullet's text has to survive: a parser that eats a bullet shows a
+        // shorter changelog rather than an error, which is invisible on a phone.
+        // (The count is asserted again below, next to the wrap check, because the
+        // two together are what rule out a parser that merged two items into one.)
+        val sourceBullets = realNotes.lineSequence()
+            .count { it.trimStart().startsWith("- ") }
+        check(
+            "真实更新说明的列表项没有丢失",
+            realBlocks.count { it is Markdown.Block.Bullet } == sourceBullets,
+            "源 $sourceBullets 项 -> 解析 ${realBlocks.count { it is Markdown.Block.Bullet }} 项",
+        )
+
+        // And every *line* of the notes has to be accounted for. This is the check
+        // that catches the continuation-line bug: treating an indented wrap as a
+        // new paragraph keeps every character on screen while cutting each bullet
+        // in half, so only comparing the text can tell the difference. Markup
+        // punctuation is stripped from both sides -- it is not content, and the
+        // bullet markers would otherwise dominate the count.
+        val markup = Regex("[\\s*`#>\\[\\]()]")
+        val sourceWords = realNotes.replace(markup, "")
+        val parsedWords = Markdown.plainText(realNotes).replace(markup, "")
+        check(
+            "真实更新说明的文字没有丢失",
+            parsedWords.length >= sourceWords.length * 0.98,
+            "源 ${sourceWords.length} 字 -> 解析 ${parsedWords.length} 字",
+        )
+        // The 1.0.6 notes contain "Content-Range" inside a bold run and a code
+        // span; if the parser dropped either, this sentence would lose it. Checked
+        // against the unstripped text, because the hyphen is part of the term.
+        check(
+            "真实更新说明里的行内代码没有丢失",
+            Markdown.plainText(realNotes).contains("Content-Range"),
+            "解析结果中未找到 Content-Range",
+        )
+        // No bullet may be left as its own first line only. The real notes wrap at
+        // 80 columns, so the decisive fact is that a parsed bullet is *much longer
+        // than any single source line*: under the orphan bug every bullet is
+        // exactly one source line long, and the longest source line is bounded by
+        // the wrap column. Comparing the longest parsed item against the longest
+        // source line is therefore a check the bug cannot pass, where comparing
+        // parsed text to the source's first line would be vacuous -- under the bug
+        // those two are equal by construction.
+        val longestSourceLine = realNotes.lineSequence().maxOf { it.trim().length }
+        val longestBullet = realBlocks.filterIsInstance<Markdown.Block.Bullet>()
+            .maxOfOrNull { it.text.length } ?: 0
+        check(
+            "真实更新说明的折行被并入列表项",
+            longestBullet > longestSourceLine * 2,
+            "最长列表项 $longestBullet 字 / 最长源行 $longestSourceLine 字",
+        )
+        // And the bullet count must match, so a parser that merged two items into
+        // one cannot pass the check above by accident.
+        val sourceBulletLines = realNotes.lineSequence()
+            .count { it.trimStart().startsWith("- ") }
+        check(
+            "真实更新说明的列表项数量一致",
+            realBlocks.count { it is Markdown.Block.Bullet } == sourceBulletLines,
+            "源 $sourceBulletLines -> 解析 ${realBlocks.count { it is Markdown.Block.Bullet }}",
+        )
+    }
 
     println()
     println("== 在线阅读的部分下载 ==")

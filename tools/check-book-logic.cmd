@@ -38,6 +38,10 @@ call :find_jar KOTLIN_HOME "kotlin-compiler-embeddable-1.9.24.jar"
 call :find_jar STDLIB      "kotlin-stdlib-1.9.24.jar"
 call :find_jar SCRIPT_RT   "kotlin-script-runtime-1.9.24.jar"
 call :find_jar ANNOT       "annotations-13.0.jar"
+REM Gson, for reading the real dist/update.json back the same way the app does.
+REM Hand-unescaping a JSON string literal in the check would be a second
+REM implementation of JSON, and the one that is wrong would be the check.
+call :find_jar GSON        "gson-2.10.1.jar"
 
 if not defined KOTLIN_HOME (
   echo [ERROR] kotlin-compiler-embeddable-1.9.24.jar not found in the Gradle cache 1>&2
@@ -45,6 +49,10 @@ if not defined KOTLIN_HOME (
 )
 if not defined STDLIB (
   echo [ERROR] kotlin-stdlib-1.9.24.jar not found in the Gradle cache 1>&2
+  exit /b 1
+)
+if not defined GSON (
+  echo [ERROR] gson-2.10.1.jar not found in the Gradle cache 1>&2
   exit /b 1
 )
 
@@ -64,7 +72,7 @@ REM The compiler needs its own dependencies on the classpath; the code under tes
 REM only needs the stdlib.
 set "COMPILER_CP=%KOTLIN_HOME%;%STDLIB%;%TROVE%;%ANNOT%;%SCRIPT_RT%"
 
-echo [info] compiling the app's TextCodec, Chapters, PageCursor, TextFlow, ReaderInk, Bookmarks, OnlineCachePolicy, PartialRead, AutoRead, UpdateDecision and ShelfLabels...
+echo [info] compiling the app's TextCodec, Chapters, PageCursor, TextFlow, ReaderInk, Bookmarks, OnlineCachePolicy, PartialRead, AutoRead, Markdown, UpdateDecision and ShelfLabels...
 REM -no-stdlib/-no-reflect: the compiler is run from a bare jar rather than a Kotlin
 REM distribution, so it must not go looking for a "Kotlin home" it does not have.
 REM The stdlib is supplied explicitly through -cp instead.
@@ -74,13 +82,13 @@ REM crash it fixes (an empty page list asked for its last entry) is only caught 
 REM exercising the real code, and Model.kt/ShelfLabels.kt are what the shelf
 REM renders. Kotlin only needs the files it is handed, so the Android imports in
 REM the surrounding classes never come into it -- which is also why TextFlow.kt,
-REM ReaderInk.kt, Bookmarks.kt, OnlineCachePolicy.kt, PartialRead.kt, AutoRead.kt
-REM and UpdateDecision.kt are kept free of Android and Compose types.
+REM ReaderInk.kt, Bookmarks.kt, OnlineCachePolicy.kt, PartialRead.kt, AutoRead.kt,
+REM Markdown.kt and UpdateDecision.kt are kept free of Android and Compose types.
 "%JDK%\bin\java.exe" -cp "%COMPILER_CP%" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler ^
-  -no-stdlib -no-reflect -nowarn -cp "%STDLIB%" -d "%OUT%" ^
+  -no-stdlib -no-reflect -nowarn -cp "%STDLIB%;%GSON%" -d "%OUT%" ^
   "%SRC%\TextCodec.kt" "%SRC%\Chapters.kt" "%SRC%\Model.kt" "%SRC%\ShelfLabels.kt" ^
   "%SRC%\ReaderInk.kt" "%SRC%\Bookmarks.kt" "%SRC%\OnlineCachePolicy.kt" ^
-  "%SRC%\PartialRead.kt" ^
+  "%SRC%\PartialRead.kt" "%SRC%\Markdown.kt" ^
   "%SRC_READER%\PageCursor.kt" "%SRC_READER%\TextFlow.kt" "%SRC_READER%\AutoRead.kt" ^
   "%SRC_UPDATE%\UpdateDecision.kt" ^
   "%ROOT%\tools\codec-check\CodecCheck.kt"
@@ -95,7 +103,9 @@ echo [info] running checks...
 echo.
 REM Force UTF-8 so the CJK assertions print readably on a GBK console.
 set "JAVA_TOOL_OPTIONS=-Dfile.encoding=UTF-8"
-"%JDK%\bin\java.exe" -cp "%OUT%;%STDLIB%" com.readon.reader.data.CodecCheckKt
+REM The repo root is passed explicitly: one group of checks reads the real
+REM dist/update.json, and a relative path would depend on where the caller stood.
+"%JDK%\bin\java.exe" -Dreadon.repoRoot="%ROOT%" -cp "%OUT%;%STDLIB%;%GSON%" com.readon.reader.data.CodecCheckKt
 set "CODE=%ERRORLEVEL%"
 
 rmdir /s /q "%OUT%" 2>nul
