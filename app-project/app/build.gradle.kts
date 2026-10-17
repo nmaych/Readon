@@ -10,9 +10,9 @@ plugins {
 // 10007. CI overrides these from the git tag, which keeps the tag, the APK
 // metadata and dist/update.json from drifting apart.
 // ---------------------------------------------------------------------------
-val appVersionCode: Int = (System.getenv("READON_VERSION_CODE") ?: "10007").toIntOrNull()
+val appVersionCode: Int = (System.getenv("READON_VERSION_CODE") ?: "10008").toIntOrNull()
     ?: error("READON_VERSION_CODE must be an integer")
-val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.7"
+val appVersionName: String = System.getenv("READON_VERSION_NAME") ?: "1.0.8"
 
 // ---------------------------------------------------------------------------
 // Release signing: environment variables first (CI), then keystore.properties

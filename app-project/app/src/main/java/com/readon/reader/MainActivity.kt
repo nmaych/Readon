@@ -12,6 +12,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import com.readon.reader.data.Prefs
 import com.readon.reader.ui.AppShell
+import com.readon.reader.ui.components.ProvideWindowSize
 import com.readon.reader.ui.theme.ReadonTheme
 
 class MainActivity : ComponentActivity() {
@@ -39,6 +40,14 @@ private fun ReadonRoot() {
     }
 
     ReadonTheme(darkTheme = dark) {
-        AppShell(app = app)
+        // The window's measured size is published once, here, and read by every
+        // screen. Measured at the root rather than per screen so that the width
+        // class is a property of the window and not of whatever space a `Scaffold`
+        // had left over -- on a device in landscape the bottom bar is 62 dp of
+        // height, and a class computed from the content box would flip between two
+        // layouts depending on whether that bar was showing.
+        ProvideWindowSize {
+            AppShell(app = app)
+        }
     }
 }

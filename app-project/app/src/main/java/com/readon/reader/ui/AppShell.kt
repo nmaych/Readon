@@ -140,6 +140,11 @@ fun AppShell(app: ReadonApp) {
                         contentPadding = padding,
                         toast = toast,
                         onOpen = { openBook = it },
+                        // Same reason as the shelf: reading a book from the online
+                        // library both writes to and reads from the cache, so the
+                        // "已缓存" marks on the list are re-read once the reader
+                        // closes rather than left as they were when it opened.
+                        dataRevision = dataRevision,
                     )
                     1 -> ShelfScreen(
                         app = app,

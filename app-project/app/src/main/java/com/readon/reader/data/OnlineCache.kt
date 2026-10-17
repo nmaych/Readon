@@ -78,6 +78,34 @@ class OnlineCache(private val context: Context) {
     }
 
     /**
+     * Which of [books] already have a complete copy here.
+     *
+     * Deliberately separate from [get]. [get] answers "hand me the bytes to
+     * read": it is per-book, it touches the file's timestamp so that eviction
+     * stays least-recently-*used*, and it deletes residue it finds. This answers
+     * "show the user what is already on the device", which is a question about a
+     * whole listing and must have none of those side effects -- touching the
+     * timestamp here would let a scroll through 主页 rewrite the eviction order,
+     * and deleting here would take that decision away from the read that has all
+     * the context.
+     *
+     * One directory listing is matched by name rather than stat-ing every
+     * expected path: a library can hold hundreds of books and almost none of them
+     * are cached. `.part` files can never match, because [fileFor] names only the
+     * finished file.
+     */
+    suspend fun cachedIds(books: List<Book>): Set<String> = withContext(Dispatchers.IO) {
+        val present = dir.listFiles()
+            ?.filter { it.isFile && !it.name.endsWith(PART_SUFFIX) }
+            ?.associateBy { it.name }
+            ?: return@withContext emptySet()
+        books.filter { book ->
+            val file = present[fileFor(book).name] ?: return@filter false
+            OnlineCachePolicy.isUsable(file.length(), book.size)
+        }.mapTo(HashSet()) { it.id }
+    }
+
+    /**
      * Where a fresh download should be written before it is promoted.
      *
      * A sibling `.part` file, promoted by [commit] once the bytes are complete.

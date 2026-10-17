@@ -63,9 +63,11 @@ import com.readon.reader.data.Book
 import com.readon.reader.data.LocalImport
 import com.readon.reader.data.ShelfLabels
 import com.readon.reader.data.formatSize
+import com.readon.reader.ui.Adapt
 import com.readon.reader.ui.collectAsStateSafe
 import com.readon.reader.ui.components.BookCover
 import com.readon.reader.ui.components.EmptyState
+import com.readon.reader.ui.components.LocalWindowSize
 import kotlinx.coroutines.launch
 
 private enum class ShelfSort(val label: String) {
@@ -276,8 +278,21 @@ fun ShelfScreen(
                 },
             )
         } else {
+            // `GridCells.Adaptive` has no upper bound: at 1200 dp it lays out eleven
+            // covers across, which is not a bigger shelf but a contact sheet --
+            // titles too small to read, rows too long to scan. The column count is
+            // therefore computed and capped in [Adapt], and the grid is fixed at it.
+            val window = LocalWindowSize.current
+            val columns = remember(window.widthDp) {
+                Adapt.gridColumns(
+                    widthDp = window.widthDp - 32, // minus the 16 dp horizontal padding
+                    gapDp = 12,
+                    minColumnDp = Adapt.SHELF_TILE_MIN,
+                )
+            }
+
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 104.dp),
+                columns = GridCells.Fixed(columns),
                 contentPadding = PaddingValues(
                     start = 16.dp,
                     end = 16.dp,

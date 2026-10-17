@@ -98,6 +98,18 @@ class OnlineLibrary(
     var downloaded: Map<String, Book> by mutableStateOf(emptyMap())
         private set
 
+    /**
+     * Ids the online cache can serve without a network round trip.
+     *
+     * A third thing again, next to [downloadedIds] and [downloads]: the book is
+     * neither on the shelf nor being fetched, it just happens to be sitting in
+     * `cacheDir` from an earlier read. The user cannot see that directory and
+     * Android can delete it at any moment, so the only honest way to use it is to
+     * tell them when it is there.
+     */
+    var cachedIds: Set<String> by mutableStateOf(emptySet())
+        private set
+
     /** Books being downloaded right now, keyed by id. */
     val downloads = mutableStateMapOf<String, Download>()
 
@@ -183,6 +195,12 @@ class OnlineLibrary(
             pendingForce = false
             ensureLoaded(force = true)
         }
+
+        // A fresh listing is what makes the cache question answerable at all --
+        // the sizes it carries are half of `isUsable` -- so the scan belongs here
+        // rather than only at the call site, which cannot know when the load
+        // actually finished.
+        refreshCached()
     }
 
     /** Re-read which books have a local copy. */
@@ -192,6 +210,36 @@ class OnlineLibrary(
             downloaded = shelf.associateBy { it.id }
             downloadedIds = shelf.mapTo(HashSet()) { it.id }
         }
+    }
+
+    /**
+     * Re-read which books the online cache can serve as they are.
+     *
+     * Only meaningful once a listing is in hand -- what is cached is decided by
+     * comparing against each book's size -- so a call before the first load finishes
+     * is a no-op rather than an empty answer that would flash the whole shelf as
+     * uncached.
+     */
+    fun refreshCached() {
+        val current = books
+        if (current.isEmpty()) return
+        scope.launch { cachedIds = cache?.cachedIds(current) ?: emptySet() }
+    }
+
+    /**
+     * Forget every cached mark without consulting the disk.
+     *
+     * For the one caller that has just deleted everything: 设置's 清理在线阅读缓存
+     * empties the cache and then has to say so. Going through [refreshCached] would
+     * work only while a listing happens to be loaded -- it returns early on an empty
+     * `books`, which is exactly the state after the user clears the cache before ever
+     * opening 主页 -- and the stale marks would then be re-shown from the previous
+     * scan the next time the list composed.
+     *
+     * An empty set is the honest answer: the directory is gone.
+     */
+    fun forgetCached() {
+        cachedIds = emptySet()
     }
 
     /**
@@ -272,6 +320,7 @@ class OnlineLibrary(
                 // "stored twice".
                 cache?.remove(book)
                 refreshDownloaded()
+                refreshCached()
                 onDone("已下载：${book.title}")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // The process is going away; leave the partial file for cleanup.

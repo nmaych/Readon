@@ -23,16 +23,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -114,6 +111,7 @@ import com.readon.reader.reader.Paginator
 import com.readon.reader.reader.ReaderState
 import com.readon.reader.reader.TextFlow
 import com.readon.reader.reader.TextPaginator
+import com.readon.reader.ui.Adapt
 import com.readon.reader.ui.collectAsStateSafe
 import com.readon.reader.ui.components.EmptyState
 import com.readon.reader.ui.theme.ReaderFont
@@ -294,28 +292,31 @@ fun ReaderScreen(
     }
 
     /**
-     * Take the system navigation bar out of the way for as long as the book is
-     * open.
+     * Take **both** system bars out of the way for as long as the book is open.
      *
-     * While a book is open the bottom of the screen is the reader's: the body text
-     * runs to the edge, the footer is drawn over it, and a bar of system buttons
-     * sitting under a page of prose is both a distraction and a strip of screen
-     * the text cannot use. It is hidden for the whole visit and **restored on
-     * dispose** -- leaving the reader with the bar still gone would take the app's
-     * navigation away from every other screen.
+     * The reader is edge-to-edge and draws its own background, so the whole window
+     * is the page: a strip of system chrome at the top and another at the bottom is
+     * screen the text cannot use and attention it does not need. Both are hidden
+     * for the whole visit and **restored on dispose** -- leaving the reader with
+     * them still gone would take the app's own navigation away from every other
+     * screen.
      *
      * The behaviour is [WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE]
-     * rather than a hard hide: a reader who needs the bar can still get it back by
-     * swiping, and it slides away again on its own. A permanent hide with no way
-     * out would make the app's own back gesture unreachable for anyone who does
-     * not know the edge-swipe, which is a worse trade than a bar that reappears
-     * when asked for.
+     * rather than a hard hide: a reader who needs the clock, the battery or the
+     * navigation buttons can still get them back by swiping from that edge, and
+     * they slide away again on their own. A permanent hide with no way out would
+     * make the app's own back gesture unreachable for anyone who does not know the
+     * edge-swipe, which is a worse trade than bars that reappear when asked for.
+     *
+     * Because the status bar is hidden, the body text does **not** reserve space
+     * for it -- see `topInset` in [ReaderBody], which measures the blank space from
+     * the display cutout and a line of text instead.
      *
      * Keyed on `book.id` and **not** on the reader theme, unlike the icon tints
      * above: the system can restore the bars on its own (returning from the
      * installer, a configuration change), so this has to be re-applied per book --
      * but a theme change happens *while* the reader is sitting there, and keying
-     * on it would show the bar and hide it again, a visible flicker, every time
+     * on it would show the bars and hide them again, a visible flicker, every time
      * the reader switched between 纸白 and 夜间.
      */
     DisposableEffect(book.id) {
@@ -326,15 +327,12 @@ fun ReaderScreen(
         } else {
             val controller = WindowCompat.getInsetsController(window, view)
             val previousBehavior = controller.systemBarsBehavior
-            // Hide the navigation bar only, never the status bar: the clock and the
-            // battery are how a reader knows how long they have been reading, and
-            // the top inset is sized for a visible status bar.
             controller.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            controller.hide(WindowInsetsCompat.Type.navigationBars())
+            controller.hide(WindowInsetsCompat.Type.systemBars())
             onDispose {
                 controller.systemBarsBehavior = previousBehavior
-                controller.show(WindowInsetsCompat.Type.navigationBars())
+                controller.show(WindowInsetsCompat.Type.systemBars())
             }
         }
     }
@@ -443,39 +441,38 @@ private fun ReaderBody(
 ) {
     val content = state.content ?: return
 
-    val horizontalPadding = 22.dp
     val verticalPadding = 16.dp
 
     /**
-     * A blank line above the text, so the first line never sits under the phone's
-     * own status bar.
+     * The blank space kept above the body text.
      *
-     * The reader is edge-to-edge and draws its own background, and the top bar is
-     * hidden most of the time -- which is the point of a reading screen, but it
-     * also means the body text was laid out under the status bar's clock and
-     * battery. This is a fixed inset rather than `statusBarsPadding()` because
-     * the text must clear the *system* UI whether or not the chrome is showing;
-     * keying it on the chrome would make the text jump by a line every time the
-     * toolbar was toggled.
+     * The reader hides the phone's status bar for the whole visit (see the
+     * `DisposableEffect` in [ReaderScreen]), so the body text no longer has a clock
+     * and a battery to clear. It still needs a margin: text starting at the very
+     * top edge of the screen reads as a rendering mistake, and on a phone with a
+     * notch or a punch-hole the camera is *physically* in the way whatever the
+     * system bars are doing.
      *
-     * Two things make this robust rather than approximate:
+     * So the clearance is two things added together:
      *
-     *   * The clearance is the **union of the status bar and the display cutout**,
-     *     not the status bar alone. On a device with a notch or a punch-hole the
-     *     cutout can extend past the status bar -- in landscape it usually does --
-     *     and taking only the status bar leaves the first line under the camera.
-     *   * The blank line is **one real line of body text**, derived from the
-     *     reader's own font size and line spacing rather than a fixed 14 dp. The
-     *     promise is "one blank line", and at 30 sp text a fixed 14 dp is less
-     *     than half of one.
+     *   * **The display cutout**, because that is a hardware obstruction and not a
+     *     bar that can be hidden. It is measured from the cutout rather than from
+     *     `WindowInsets.statusBars` on purpose: Compose reports the status-bar
+     *     inset as the *visible* inset, which is zero while the bar is hidden -- so
+     *     sizing this from the status bar would silently collapse to the bare
+     *     minimum on every device, which is exactly the bug this replaced.
+     *   * **One real line of body text**, derived from the reader's own font size
+     *     and line spacing rather than a fixed number of dp, because the promise is
+     *     a blank line and a fixed 14 dp is less than half of one at 30 sp.
+     *
+     * The two are added, not maxed: the blank space is meant to be *visible*, and
+     * taking the larger of the two would leave the first line flush against the
+     * bottom of the notch.
      */
     val topInset = with(density) {
-        val system = WindowInsets.statusBars
-            .union(WindowInsets.displayCutout)
-            .getTop(this)
-            .toDp()
+        val cutout = WindowInsets.displayCutout.getTop(this).toDp()
         val blankLine = (fontSize * lineSpacing).sp.toDp()
-        system + maxOf(blankLine, MIN_TOP_BLANK)
+        cutout + maxOf(blankLine, MIN_TOP_BLANK)
     }
 
     /**
@@ -519,9 +516,29 @@ private fun ReaderBody(
         state.pendingJumpOffset = absolute
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val pageWidthPx = with(density) {
-            (constraints.maxWidth - horizontalPadding.toPx() * 2).toInt()
+        // The text column is capped, and the margin is whatever that leaves over.
+        //
+        // A 1200 dp tablet with the phone's 22 dp margins is a ~1150 dp line, which
+        // at 18 sp holds roughly 64 Chinese characters -- twice the upper end of
+        // what is comfortable, and the eye loses the line on the way back down.
+        //
+        // Note the direction of the fix: it is the *column* that is bounded, not the
+        // margin. Capping the margin instead leaves a 2560 dp window with a text
+        // column over 2000 dp wide, so the cap has to apply to the text and the
+        // margin has to be derived from what is left. See [Adapt.READER_TEXT_MAX_DP].
+        //
+        // Derived from `constraints` rather than from the window size published at
+        // the root because the reader is the one screen that really does fill the
+        // window, and the *paginator* and the *drawn column* must get the width from
+        // the same number -- measuring a page against one width and drawing it at
+        // another clips the last line mid-character.
+        val windowWidthDp = with(density) { constraints.maxWidth.toDp().value.toInt() }
+        val textWidthDp = Adapt.readerTextWidthDp(windowWidthDp)
+        val horizontalPadding = with(density) {
+            Adapt.readerHorizontalPaddingDp(windowWidthDp).dp
         }
+
+        val pageWidthPx = with(density) { textWidthDp.dp.roundToPx() }
         val pageHeightPx = with(density) {
             // The top inset is part of the page's padding, so it has to come out
             // of the measured height as well: paginating against the full height
@@ -1152,18 +1169,11 @@ private fun ScrollReader(
             // plumbing the chrome's measured height back into the list -- is a
             // composition-time loop for a constant.
             //
-            // Top: the status-bar inset plus one blank line, so the first
-            // paragraph is never under the phone's own clock and battery, and the
-            // top bar's own height (~60 dp of content) on top of that. Bottom: the
-            // progress bar, the position row and the action row (~74 dp), plus
-            // room for the system navigation bar.
-            //
-            // The navigation-bar inset is not read here even though the reader is
-            // edge-to-edge: it hides that bar for the whole visit (see the
-            // `DisposableEffect` in `ReaderScreen`), so its inset is zero while
-            // this column is on screen and reading it would reserve space for a
-            // bar that is not there. The allowance stays a constant so the last
-            // paragraph still clears the reader's own footer.
+            // Top: the reader's own blank space (`topInset`, which is the cutout
+            // plus a line of text -- the status bar is hidden, so it contributes
+            // nothing) and the top bar's own height (~60 dp of content) on top of
+            // that. Bottom: the progress bar, the position row and the action row
+            // (~74 dp), plus the bottom chrome margin.
             contentPadding = PaddingValues(
                 start = horizontalPadding,
                 end = horizontalPadding,
@@ -1200,10 +1210,42 @@ private const val SENTINEL_LAST_PAGE = Int.MAX_VALUE / 2
  * The blank line is normally one line of body text (see `topInset`), which scales
  * with the reader's font size. This is the floor for the case where that would be
  * too little to read as a margin at all -- the smallest font size the reader
- * offers is 12 sp, and a page whose first line is a hair under the status bar
- * looks like a layout mistake rather than a margin.
+ * offers is 12 sp, and a page whose first line is a hair under the top edge looks
+ * like a layout mistake rather than a margin.
  */
 private val MIN_TOP_BLANK = 14.dp
+
+/**
+ * The smallest margin the reader's own chrome keeps from the top and bottom edges.
+ *
+ * The reader hides both system bars, so `statusBarsPadding()` and
+ * `navigationBarsPadding()` both report zero here and the toolbar would be drawn
+ * flush against the edge of the screen -- which looks like a clipped layout rather
+ * than a deliberate one, and at the bottom leaves the buttons inside the system's
+ * gesture area where a swipe competes with them. The cutout is padded for
+ * separately; this is the margin on a device that has neither a bar nor a notch.
+ */
+private val CHROME_EDGE_MIN = 10.dp
+
+/**
+ * Clearance for the reader's own chrome at the top of the screen.
+ *
+ * `displayCutoutPadding()` rather than `statusBarsPadding()`: the status bar is
+ * hidden for the whole visit, so its inset is zero, but a notch is *hardware* and
+ * does not care that the bar is hidden. Padding the cutout explicitly is what
+ * keeps the toolbar's buttons out from under the camera.
+ */
+@Composable
+private fun Modifier.readerTopChrome(): Modifier =
+    this.displayCutoutPadding().padding(top = CHROME_EDGE_MIN)
+
+/**
+ * Clearance for the reader's own chrome at the bottom of the screen.
+ *
+ * Same reasoning as [readerTopChrome], for the hidden navigation bar.
+ */
+private fun Modifier.readerBottomChrome(): Modifier =
+    this.padding(bottom = CHROME_EDGE_MIN)
 
 /**
  * One frame, for the wait when the column has not been measured yet.
@@ -1242,7 +1284,10 @@ private fun ReaderTopBar(
         Row(
             Modifier
                 .fillMaxWidth()
-                .statusBarsPadding()
+                // Not `statusBarsPadding()`: the reader hides the status bar, so
+                // that inset is zero and this bar would be drawn flush against the
+                // top edge and under any notch. See `readerTopChrome`.
+                .readerTopChrome()
                 .padding(horizontal = 4.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1311,7 +1356,10 @@ private fun ReaderBottomBar(
     val atCurrent = Bookmarks.at(state.bookmarks, state.currentOffset)
 
     Surface(color = skin.background, modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.navigationBarsPadding()) {
+        // `readerBottomChrome` rather than `navigationBarsPadding()`: the reader
+        // hides the navigation bar, so that inset is zero and the buttons would sit
+        // inside the system's gesture area. See the helper.
+        Column(Modifier.readerBottomChrome()) {
             LinearProgressIndicator(
                 progress = { fraction },
                 modifier = Modifier
@@ -1548,7 +1596,7 @@ private fun TocPanel(
             Column(
                 Modifier
                     .fillMaxSize()
-                    .statusBarsPadding()
+                    .readerTopChrome()
             ) {
                 Row(
                     Modifier
@@ -1627,7 +1675,7 @@ private fun SearchPanel(
         tonalElevation = 4.dp,
         modifier = Modifier
             .fillMaxWidth()
-            .statusBarsPadding(),
+            .readerTopChrome(),
     ) {
         Column(Modifier.padding(14.dp)) {
             OutlinedTextField(
@@ -1750,7 +1798,7 @@ private fun BookmarkPanel(
             Column(
                 Modifier
                     .fillMaxSize()
-                    .navigationBarsPadding()
+                    .readerBottomChrome()
             ) {
                 Row(
                     Modifier
@@ -1949,7 +1997,7 @@ private fun ReaderOptionsPanel(
             Column(
                 Modifier
                     .fillMaxSize()
-                    .navigationBarsPadding()
+                    .readerBottomChrome()
                     .verticalScroll(rememberScrollState())
                     .padding(16.dp),
             ) {

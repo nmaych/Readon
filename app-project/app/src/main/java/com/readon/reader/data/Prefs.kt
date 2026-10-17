@@ -53,6 +53,22 @@ class Prefs(context: Context) {
         _revision.value = _revision.value + 1
     }
 
+    /**
+     * Write without bumping [revision].
+     *
+     * For state that is *bookkeeping about the UI* rather than a setting: where
+     * the user had scrolled, what they had typed. Those must not look like a
+     * configuration change, because every screen treats [revision] as "the
+     * settings moved, re-read everything" -- 主页 in particular restarts its
+     * library load on it. Saving the scroll position through [edit] made the home
+     * screen reload the whole listing every time the user left the tab, which is
+     * both a wasted network round trip and exactly the kind of thing that makes a
+     * "remembered" screen feel slower than a fresh one.
+     */
+    private fun editQuiet(block: SharedPreferences.Editor.() -> Unit) {
+        sp.edit().apply(block).apply()
+    }
+
     // --- library source ----------------------------------------------------
     var owner: String
         get() = sp.getString(K_OWNER, null) ?: DEFAULT_OWNER
@@ -247,6 +263,51 @@ class Prefs(context: Context) {
         get() = sp.getLong(K_LAST_CHECK, 0L)
         set(v) = edit { putLong(K_LAST_CHECK, v) }
 
+    // --- home screen memory ------------------------------------------------
+    /**
+     * What the user was browsing on 主页.
+     *
+     * Stored here rather than in the screen because 主页 is disposed whenever the
+     * user visits another tab -- `AppShell` swaps the subtree, so neither
+     * `remember` nor `rememberSaveable` survives it. See [HomeMemory] for what is
+     * kept and why the source is part of the record.
+     *
+     * Written through [editQuiet] rather than [edit]: this is bookkeeping about
+     * where the user was looking, not a setting, and bumping [revision] for it
+     * would make 主页 reload its whole listing every time the user switched tabs.
+     */
+    var homeMemory: HomeMemory
+        get() = HomeMemory(
+            sourceKey = sp.getString(K_HOME_SOURCE, "").orEmpty(),
+            query = sp.getString(K_HOME_QUERY, "").orEmpty(),
+            collection = sp.getString(K_HOME_COLLECTION, null),
+            scrollIndex = sp.getInt(K_HOME_SCROLL_INDEX, 0),
+            scrollOffset = sp.getInt(K_HOME_SCROLL_OFFSET, 0),
+        )
+        set(v) = editQuiet {
+            putString(K_HOME_SOURCE, v.sourceKey)
+            putString(K_HOME_QUERY, v.query)
+            putString(K_HOME_COLLECTION, v.collection)
+            putInt(K_HOME_SCROLL_INDEX, v.scrollIndex)
+            putInt(K_HOME_SCROLL_OFFSET, v.scrollOffset)
+        }
+
+    /**
+     * Forget the remembered browse state.
+     *
+     * Clearing rather than writing defaults, so an unset memory and a memory of
+     * "the default view" are different states on disk: the first means "never
+     * visited", the second means "visited and left at the top". Quiet for the same
+     * reason as the setter.
+     */
+    fun clearHomeMemory() = editQuiet {
+        remove(K_HOME_SOURCE)
+        remove(K_HOME_QUERY)
+        remove(K_HOME_COLLECTION)
+        remove(K_HOME_SCROLL_INDEX)
+        remove(K_HOME_SCROLL_OFFSET)
+    }
+
     companion object {
         const val DEFAULT_OWNER = "nmaych"
         const val DEFAULT_REPO = "ReadonBooklibrary"
@@ -290,5 +351,10 @@ class Prefs(context: Context) {
         private const val K_IGNORED_VERSION = "ignored_version"
         private const val K_AUTO_UPDATE = "auto_update"
         private const val K_LAST_CHECK = "last_check"
+        private const val K_HOME_SOURCE = "home_source"
+        private const val K_HOME_QUERY = "home_query"
+        private const val K_HOME_COLLECTION = "home_collection"
+        private const val K_HOME_SCROLL_INDEX = "home_scroll_index"
+        private const val K_HOME_SCROLL_OFFSET = "home_scroll_offset"
     }
 }

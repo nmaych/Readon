@@ -11,6 +11,9 @@ import com.readon.reader.data.Prefs
 import com.readon.reader.net.GithubClient
 import com.readon.reader.update.UpdateCenter
 import com.readon.reader.update.UpdateManager
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -78,6 +81,29 @@ class ReadonApp : Application() {
     /** The update check's state, shared across screens. */
     lateinit var updateCenter: UpdateCenter
         private set
+
+    /**
+     * Bumped whenever something outside a screen invalidates what a screen is
+     * showing.
+     *
+     * The concrete case is the online cache: 设置 can empty it while 主页 still holds
+     * the 已缓存 marks it derived before. 主页 only re-derives them on its own
+     * triggers (a listing load, a finished download, the reader closing), and
+     * clearing the cache is none of those -- it happens on a different screen with
+     * no call into [OnlineLibrary] at all. So the cache reports it here and the home
+     * screen watches it.
+     *
+     * Distinct from [Prefs.revision], which means "a setting changed": the home
+     * screen restarts its library load on that one, and a cache clear must not
+     * cost a network round trip.
+     */
+    var cacheRevision: Int by mutableStateOf(0)
+        private set
+
+    /** Announce that the online cache changed and screen-held marks are stale. */
+    fun invalidateCache() {
+        cacheRevision++
+    }
 
     override fun onCreate() {
         super.onCreate()

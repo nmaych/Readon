@@ -24,6 +24,7 @@ set "JDK=%TC%\jdk\jdk-17.0.20.1+1"
 set "SRC=%ROOT%\app-project\app\src\main\java\com\readon\reader\data"
 set "SRC_READER=%ROOT%\app-project\app\src\main\java\com\readon\reader\reader"
 set "SRC_UPDATE=%ROOT%\app-project\app\src\main\java\com\readon\reader\update"
+set "SRC_UI=%ROOT%\app-project\app\src\main\java\com\readon\reader\ui"
 set "CACHE=%TC%\gradle-home\caches\modules-2\files-2.1"
 
 if not exist "%JDK%\bin\java.exe" (
@@ -72,7 +73,7 @@ REM The compiler needs its own dependencies on the classpath; the code under tes
 REM only needs the stdlib.
 set "COMPILER_CP=%KOTLIN_HOME%;%STDLIB%;%TROVE%;%ANNOT%;%SCRIPT_RT%"
 
-echo [info] compiling the app's TextCodec, Chapters, PageCursor, TextFlow, ReaderInk, Bookmarks, OnlineCachePolicy, PartialRead, AutoRead, Markdown, UpdateDecision and ShelfLabels...
+echo [info] compiling the app's TextCodec, Chapters, PageCursor, TextFlow, ReaderInk, Bookmarks, OnlineCachePolicy, PartialRead, AutoRead, Markdown, UpdateDecision, ShelfLabels, Adapt and HomeMemory...
 REM -no-stdlib/-no-reflect: the compiler is run from a bare jar rather than a Kotlin
 REM distribution, so it must not go looking for a "Kotlin home" it does not have.
 REM The stdlib is supplied explicitly through -cp instead.
@@ -83,14 +84,15 @@ REM exercising the real code, and Model.kt/ShelfLabels.kt are what the shelf
 REM renders. Kotlin only needs the files it is handed, so the Android imports in
 REM the surrounding classes never come into it -- which is also why TextFlow.kt,
 REM ReaderInk.kt, Bookmarks.kt, OnlineCachePolicy.kt, PartialRead.kt, AutoRead.kt,
-REM Markdown.kt and UpdateDecision.kt are kept free of Android and Compose types.
+REM Markdown.kt, UpdateDecision.kt, Adapt.kt and HomeMemory.kt are kept free of
+REM Android and Compose types: that freedom is what lets them be checked here.
 "%JDK%\bin\java.exe" -cp "%COMPILER_CP%" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler ^
   -no-stdlib -no-reflect -nowarn -cp "%STDLIB%;%GSON%" -d "%OUT%" ^
   "%SRC%\TextCodec.kt" "%SRC%\Chapters.kt" "%SRC%\Model.kt" "%SRC%\ShelfLabels.kt" ^
   "%SRC%\ReaderInk.kt" "%SRC%\Bookmarks.kt" "%SRC%\OnlineCachePolicy.kt" ^
-  "%SRC%\PartialRead.kt" "%SRC%\Markdown.kt" ^
+  "%SRC%\PartialRead.kt" "%SRC%\Markdown.kt" "%SRC%\HomeMemory.kt" ^
   "%SRC_READER%\PageCursor.kt" "%SRC_READER%\TextFlow.kt" "%SRC_READER%\AutoRead.kt" ^
-  "%SRC_UPDATE%\UpdateDecision.kt" ^
+  "%SRC_UPDATE%\UpdateDecision.kt" "%SRC_UI%\Adapt.kt" ^
   "%ROOT%\tools\codec-check\CodecCheck.kt"
 
 if errorlevel 1 (

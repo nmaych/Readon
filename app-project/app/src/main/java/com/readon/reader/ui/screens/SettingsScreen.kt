@@ -626,6 +626,12 @@ fun SettingsScreen(
                                 onlineCacheBytes = 0
                                 onlineCacheCount = 0
                                 cacheTick++
+                                // 主页 still holds the 已缓存 marks it derived before
+                                // this ran, and it has no other way to learn that
+                                // the files behind them are gone: its own refresh
+                                // triggers are a listing load, a finished download
+                                // and the reader closing, none of which this is.
+                                app.invalidateCache()
                                 toast("已清空在线阅读缓存")
                             }
                         },

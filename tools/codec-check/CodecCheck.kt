@@ -6,6 +6,7 @@ import com.readon.reader.data.PartialRead
 import com.readon.reader.reader.AutoRead
 import com.readon.reader.reader.PageCursor
 import com.readon.reader.reader.TextFlow
+import com.readon.reader.ui.Adapt
 import com.readon.reader.update.UpdateDecision
 import com.readon.reader.update.UpdateResult
 import java.io.File
@@ -1408,14 +1409,34 @@ fun main() {
             parsedWords.length >= sourceWords.length * 0.98,
             "源 ${sourceWords.length} 字 -> 解析 ${parsedWords.length} 字",
         )
-        // The 1.0.6 notes contain "Content-Range" inside a bold run and a code
-        // span; if the parser dropped either, this sentence would lose it. Checked
-        // against the unstripped text, because the hyphen is part of the term.
-        check(
-            "真实更新说明里的行内代码没有丢失",
-            Markdown.plainText(realNotes).contains("Content-Range"),
-            "解析结果中未找到 Content-Range",
-        )
+        // Inline code inside the *shipped* notes must survive the parse.
+        //
+        // This used to assert the literal string "Content-Range", which only existed
+        // in the 1.0.6 notes -- so the check silently turned into a tripwire for
+        // "did anyone release since", failing on every new version for a reason that
+        // had nothing to do with the parser. The property worth checking is the one
+        // that generalises: whatever code spans this version's notes happen to
+        // contain, the parser must hand their text through. Derived from the notes
+        // themselves rather than hard-coded, so it tests the parser and not the
+        // release.
+        val codeSpans = Regex("`([^`]+)`").findAll(realNotes)
+            .map { it.groupValues[1].trim() }
+            // A single punctuation character is not a meaningful probe: it would pass
+            // even if the parser dropped the span, because the character occurs
+            // elsewhere in the prose.
+            .filter { it.length >= 3 }
+            .toList()
+        val parsedText = Markdown.plainText(realNotes)
+        if (codeSpans.isEmpty()) {
+            println("  [skip] 该版本说明里没有行内代码，跳过行内代码保留检查")
+        } else {
+            val lost = codeSpans.filterNot { parsedText.contains(it) }
+            check(
+                "真实更新说明里的行内代码没有丢失",
+                lost.isEmpty(),
+                "丢失 ${lost.size}/${codeSpans.size}：${lost.take(3).joinToString()}",
+            )
+        }
         // No bullet may be left as its own first line only. The real notes wrap at
         // 80 columns, so the decisive fact is that a parsed bullet is *much longer
         // than any single source line*: under the orphan bug every bullet is
@@ -1514,6 +1535,235 @@ fun main() {
         PartialRead.trimDanglingReplacement("正\uFFFD\uFFFD") == "正\uFFFD",
         PartialRead.trimDanglingReplacement("正\uFFFD\uFFFD"),
     )
+
+    println()
+    println("== 屏幕自适应的布局算术 ==")
+
+    // --- width classes -------------------------------------------------------
+    //
+    // The breakpoints are the whole feature: every decision below is taken from
+    // the class, so a breakpoint that is off by one puts a phone into the tablet
+    // layout and nothing else notices. The boundaries themselves are checked
+    // because "600 dp is Medium" is the kind of fact that gets edited by accident.
+    check("400dp 是紧凑宽度", Adapt.widthClass(400) == Adapt.WidthClass.Compact)
+    check("599dp 仍是紧凑宽度", Adapt.widthClass(599) == Adapt.WidthClass.Compact)
+    check("600dp 起是中宽", Adapt.widthClass(600) == Adapt.WidthClass.Medium)
+    check("839dp 仍是中宽", Adapt.widthClass(839) == Adapt.WidthClass.Medium)
+    check("840dp 起是宽", Adapt.widthClass(840) == Adapt.WidthClass.Expanded)
+    check("1200dp 是宽", Adapt.widthClass(1200) == Adapt.WidthClass.Expanded)
+    // A preview or a first measurement can hand over nothing. The narrow layout is
+    // the one that is always safe to render, so zero must not throw or answer wide.
+    check("宽度为 0 时退回紧凑", Adapt.widthClass(0) == Adapt.WidthClass.Compact)
+    check("宽度为负时退回紧凑", Adapt.widthClass(-100) == Adapt.WidthClass.Compact)
+
+    check("紧凑宽度不算宽", !Adapt.widthClass(400).isWide)
+    check("中宽算宽", Adapt.widthClass(600).isWide)
+    check("宽算宽", Adapt.widthClass(1200).isWide)
+
+    // --- content width -------------------------------------------------------
+    //
+    // This is the number that stops a book row being 1200 dp wide with its cover
+    // and its download button at opposite edges.
+    check(
+        "手机上内容宽度不封顶",
+        Adapt.contentMaxWidthDp(Adapt.WidthClass.Compact) == Int.MAX_VALUE,
+    )
+    check("手机上内容宽度就是窗口宽度", Adapt.contentWidthDp(400, Adapt.WidthClass.Compact) == 400)
+    check(
+        "中宽上内容宽度被封顶",
+        Adapt.contentWidthDp(800, Adapt.WidthClass.Medium) ==
+            Adapt.contentMaxWidthDp(Adapt.WidthClass.Medium),
+    )
+    check(
+        "封顶值小于窗口宽度才生效",
+        Adapt.contentWidthDp(1000, Adapt.WidthClass.Expanded) < 1000,
+    )
+    // Never wider than the window: returning the cap when the window is narrower
+    // would push the content off the right edge.
+    check("内容宽度不超过窗口", Adapt.contentWidthDp(500, Adapt.WidthClass.Expanded) <= 500)
+    check("窗口宽度为 0 时内容宽度为 0", Adapt.contentWidthDp(0, Adapt.WidthClass.Medium) == 0)
+
+    // The gutter is what actually centres the column, so it has to be symmetric by
+    // construction: content + both gutters must come back to the window.
+    val gutterWindow = 1000
+    val gutter = Adapt.sideGutterDp(gutterWindow, Adapt.WidthClass.Expanded)
+    val contentHere = Adapt.contentWidthDp(gutterWindow, Adapt.WidthClass.Expanded)
+    check("边距加内容宽度正好等于窗口", contentHere + gutter * 2 == gutterWindow, "$contentHere + $gutter*2")
+    check("紧凑宽度上没有边距", Adapt.sideGutterDp(400, Adapt.WidthClass.Compact) == 0)
+    check("窗口宽度为 0 时没有边距", Adapt.sideGutterDp(0, Adapt.WidthClass.Medium) == 0)
+
+    // --- grid columns --------------------------------------------------------
+    //
+    // `GridCells.Adaptive` has no ceiling, which is exactly the bug this replaces:
+    // a 1200 dp tablet laid out eleven shelf covers across, which is not a bigger
+    // shelf but an unreadable contact sheet.
+    check("手机上书架两列", Adapt.gridColumns(360, 12, Adapt.SHELF_TILE_MIN) >= 1)
+    check("手机宽度至少有一列", Adapt.gridColumns(200, 12, Adapt.SHELF_TILE_MIN) >= 1)
+    check("列数有上限", Adapt.gridColumns(4000, 12, Adapt.SHELF_TILE_MIN) <= Adapt.MAX_GRID_COLUMNS)
+    check("极宽窗口不会得到几十列", Adapt.gridColumns(4000, 12, Adapt.SHELF_TILE_MIN) == Adapt.MAX_GRID_COLUMNS)
+    check("宽度为 0 时一列", Adapt.gridColumns(0, 12, Adapt.SHELF_TILE_MIN) == 1)
+    check("最小列宽为 0 时一列", Adapt.gridColumns(800, 12, 0) == 1)
+    check("负宽度时一列", Adapt.gridColumns(-50, 12, 100) == 1)
+    // Monotonic: a wider window must never produce fewer columns.
+    val columnCounts = listOf(320, 400, 600, 800, 1000, 1400, 2000).map {
+        Adapt.gridColumns(it, 12, Adapt.SHELF_TILE_MIN)
+    }
+    check("列数随宽度单调不减", columnCounts == columnCounts.sorted(), columnCounts.joinToString())
+    // The gap is part of the arithmetic: N columns plus N-1 gaps have to fit, which
+    // is why the `+ gap` appears on both sides. A wide gap with a narrow cell must
+    // not produce a column count that overflows.
+    val gapHeavy = Adapt.gridColumns(400, 40, 116)
+    check("间距被算进列数", gapHeavy * 116 + (gapHeavy - 1) * 40 <= 400, "$gapHeavy 列")
+
+    // The home screen's rows are wide (cover + two lines of text + a button), and its
+    // content column is capped, so the two interact: at 600-900 dp there must be a
+    // real second column, and past 900 dp the cap keeps the count from growing without
+    // bound. Asserted per class because "the tablet layout never actually shows two
+    // columns" is the failure that would look like a design choice.
+    for (w in listOf(600, 700, 840, 900, 1200, 1600)) {
+        val cls = Adapt.widthClass(w)
+        val contentWidth = Adapt.contentWidthDp(w, cls) - 32
+        val cols = Adapt.gridColumns(contentWidth, 10, Adapt.BOOK_ROW_MIN)
+        check("主页在宽屏上至少两列（${w}dp）", cols >= 2, "$cols 列 / 内容 $contentWidth dp")
+        check("主页列数不超过上限（${w}dp）", cols <= Adapt.MAX_GRID_COLUMNS, "$cols 列")
+        // A column narrower than a book row would put the cover and the title on top of
+        // each other.
+        val cellWidth = (contentWidth - (cols - 1) * 10) / cols
+        check(
+            "主页列宽容得下一行书（${w}dp）",
+            cellWidth >= Adapt.BOOK_ROW_MIN - 10,
+            "每列 $cellWidth dp",
+        )
+    }
+
+    // --- reader text column --------------------------------------------------
+    //
+    // The reader is the opposite case: it wants *narrower* text on a wide screen.
+    // 22 dp margins on a 1200 dp tablet is a ~1150 dp line, roughly 70 Chinese
+    // characters at 18 sp, and the eye loses the line on the way back.
+    check("手机上阅读边距是原来的 22dp", Adapt.readerHorizontalPaddingDp(360) == 22)
+    check(
+        "宽屏上阅读边距变大",
+        Adapt.readerHorizontalPaddingDp(1200) > Adapt.readerHorizontalPaddingDp(360),
+        "${Adapt.readerHorizontalPaddingDp(1200)} vs ${Adapt.readerHorizontalPaddingDp(360)}",
+    )
+    // The invariant is the *column*, not the margin: a margin cap alone leaves a
+    // 2000 dp line on a very wide window, which is 117 Chinese characters.
+    for (w in listOf(320, 360, 411, 480, 600, 800, 840, 1200, 1600, 2560, 4000)) {
+        val textWidth = Adapt.readerTextWidthDp(w)
+        check(
+            "阅读文字列宽不超过 $Adapt.READER_TEXT_MAX_DP（${w}dp 窗口）",
+            textWidth <= Adapt.READER_TEXT_MAX_DP || w < Adapt.READER_TEXT_MAX_DP + 44,
+            "$textWidth dp，约 ${textWidth / 18} 个汉字",
+        )
+        check("阅读文字宽度为正（${w}dp 窗口）", textWidth > 0, "$textWidth")
+        check(
+            "文字宽度加两侧边距不超过窗口（${w}dp 窗口）",
+            textWidth + Adapt.readerHorizontalPaddingDp(w) * 2 <= w,
+            "$textWidth + 2*${Adapt.readerHorizontalPaddingDp(w)} > $w",
+        )
+    }
+    check(
+        "阅读文字宽度加两侧边距正好铺满窗口（1200dp）",
+        Adapt.readerTextWidthDp(1200) + Adapt.readerHorizontalPaddingDp(1200) * 2 == 1200,
+        "${Adapt.readerTextWidthDp(1200)} + 2*${Adapt.readerHorizontalPaddingDp(1200)}",
+    )
+    check(
+        "阅读文字宽度加两侧边距正好铺满窗口（360dp）",
+        Adapt.readerTextWidthDp(360) + Adapt.readerHorizontalPaddingDp(360) * 2 == 360,
+    )
+    // The column must stop growing once it hits the cap, or "capped" is a lie.
+    check(
+        "超过上限后文字列宽不再增长",
+        Adapt.readerTextWidthDp(1200) == Adapt.readerTextWidthDp(2560),
+        "${Adapt.readerTextWidthDp(1200)} vs ${Adapt.readerTextWidthDp(2560)}",
+    )
+    check("阅读文字列宽在上限处正好等于上限", Adapt.readerTextWidthDp(1600) == Adapt.READER_TEXT_MAX_DP)
+    check("宽度为 0 时文字宽度为 0", Adapt.readerTextWidthDp(0) == 0)
+    check("极窄窗口文字宽度仍为正", Adapt.readerTextWidthDp(20) > 0)
+    // The margins on a phone must be untouched by this feature -- a tablet fix that
+    // widened a phone's margins would be a regression on the device most people use.
+    check("窄窗口上边距保持 22dp", Adapt.readerHorizontalPaddingDp(411) == 22)
+    check("窄窗口上文字宽度就是窗口减两边距", Adapt.readerTextWidthDp(411) == 411 - 44)
+
+    // --- dialog width --------------------------------------------------------
+    check("对话框宽度有上限", Adapt.dialogMaxWidthDp(2000) <= 600, "${Adapt.dialogMaxWidthDp(2000)}")
+    check("对话框比窗口窄", Adapt.dialogMaxWidthDp(600) < 600, "${Adapt.dialogMaxWidthDp(600)}")
+    check("窄窗口上对话框仍有最小宽度", Adapt.dialogMaxWidthDp(300) >= 240)
+
+    println()
+    println("== 主页浏览记忆 ==")
+
+    val key = "nmaych/ReadonBooklibrary@main"
+    val other = "someone/OtherLib@main"
+    val blank = HomeMemory()
+
+    // --- restorable ----------------------------------------------------------
+    //
+    // Three separate reasons to refuse a memory, and each one is a visible bug if
+    // it is ignored.
+    check(
+        "同一书库的记忆可以恢复",
+        HomeMemory(sourceKey = key, query = "三体").restorable(key),
+    )
+    // Applying 《三体》's query to a repository that never held it shows an empty
+    // list, which reads as "the library is broken".
+    check(
+        "换了书库就不恢复",
+        !HomeMemory(sourceKey = key, query = "三体").restorable(other),
+    )
+    check("从未保存过时不恢复", !blank.restorable(key))
+    check("书库为空时不恢复", !HomeMemory(sourceKey = "", query = "x").restorable(""))
+    // A negative index would throw inside LazyListState, and Prefs is a text file a
+    // user can edit.
+    check("负数滚动位置不恢复", !HomeMemory(sourceKey = key, scrollIndex = -1).restorable(key))
+    check("负数滚动偏移不恢复", !HomeMemory(sourceKey = key, scrollOffset = -5).restorable(key))
+    check(
+        "零滚动位置可以恢复（只是回到顶部）",
+        HomeMemory(sourceKey = key, scrollIndex = 0).restorable(key),
+    )
+
+    // --- collection availability --------------------------------------------
+    //
+    // Null means 全部, which is not a missing collection -- conflating the two would
+    // make every launch forget the filter.
+    check("没有选中分类时总是可用", collectionAvailable(null, emptyList()))
+    check("分类仍存在时可用", collectionAvailable("默认", listOf("默认", "武侠")))
+    check("分类已消失时不可用", !collectionAvailable("科幻", listOf("默认", "武侠")))
+    check("空分类列表上仍可用（全部）", collectionAvailable(null, emptyList()))
+
+    // --- clamped position ---------------------------------------------------
+    //
+    // A LazyListState throws on an index past the end, and the listing legitimately
+    // changes between visits.
+    check("位置在范围内时原样返回", HomeMemory(scrollIndex = 5, scrollOffset = 30).clampedPosition(20) == (5 to 30))
+    check("位置超出时收到末尾", HomeMemory(scrollIndex = 50, scrollOffset = 30).clampedPosition(20) == (19 to 0))
+    check("列表为空时回到顶部", HomeMemory(scrollIndex = 5, scrollOffset = 30).clampedPosition(0) == (0 to 0))
+    check("负数索引收到 0", HomeMemory(scrollIndex = -3, scrollOffset = 9).clampedPosition(10) == (0 to 0))
+    // Once the index has been clamped, the pixel offset is meaningless: the user is
+    // on a different row anyway, so it restarts at that row's top.
+    check(
+        "被收拢后偏移归零",
+        HomeMemory(scrollIndex = 9, scrollOffset = 77).clampedPosition(3) == (2 to 0),
+    )
+    check(
+        "第一项上保留偏移",
+        HomeMemory(scrollIndex = 0, scrollOffset = 120).clampedPosition(10) == (0 to 120),
+    )
+
+    // --- meaningfulness -----------------------------------------------------
+    //
+    // A default view is not worth remembering, and writing it would make a user who
+    // deliberately scrolled back to the top indistinguishable from one who never
+    // left.
+    check("默认视图不算值得记住", !blank.isMeaningful())
+    check("有搜索词就值得记住", HomeMemory(query = "abc").isMeaningful())
+    check("有分类筛选就值得记住", HomeMemory(collection = "默认").isMeaningful())
+    check("滚动过就值得记住", HomeMemory(scrollIndex = 3).isMeaningful())
+    check("滚动偏移不为零就值得记住", HomeMemory(scrollOffset = 40).isMeaningful())
+    // The source key is metadata, not an expressed choice: counting it would make
+    // every default view "worth remembering", because every save writes it.
+    check("只有书库键时不值得记住", !HomeMemory(sourceKey = key).isMeaningful())
 
     println()
     if (failures == 0) {
