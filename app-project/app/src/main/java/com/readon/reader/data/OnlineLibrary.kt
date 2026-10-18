@@ -268,6 +268,19 @@ class OnlineLibrary(
      * Progress is published here, so the row shows the same state from wherever
      * it is observed.
      *
+     * ## A cached book is moved, not fetched again
+     *
+     * Reading a book online leaves a complete copy in [OnlineCache]. Pressing 下载
+     * on that same book used to ignore it and pull the whole file down a second
+     * time -- up to 75 MB, over the same barely-reachable hosts the cache exists to
+     * avoid. The bytes are already on the device and already verified against the
+     * repository's reported size (that is what makes them a cache *hit*), so the
+     * honest action is to move that file onto the shelf.
+     *
+     * "Move" is a rename inside the app's own storage, which is why this is fast and
+     * why it must not fall back to a copy: the cache entry is deleted afterwards
+     * either way, so a copy would briefly double the disk usage for no benefit.
+     *
      * @param onDone called with a message for the user, on success or failure.
      */
     fun download(book: Book, onDone: (String) -> Unit) {
@@ -276,6 +289,15 @@ class OnlineLibrary(
 
         scope.launch {
             try {
+                val promoted = adoptCachedCopy(book)
+                if (promoted != null) {
+                    downloads.remove(book.id)
+                    refreshDownloaded()
+                    refreshCached()
+                    onDone("已加入书架：${book.title}")
+                    return@launch
+                }
+
                 val target = store.targetFileFor(book)
                 // Progress callbacks arrive on the IO thread that is copying
                 // bytes, and the download map is Compose snapshot state that the
@@ -336,6 +358,42 @@ class OnlineLibrary(
         }
     }
 
+    /**
+     * Move a complete cache copy of [book] onto the shelf, if there is one.
+     *
+     * Returns the shelf record on success, or null when there is nothing usable in
+     * the cache -- in which case the caller downloads as usual.
+     *
+     * ## Why this is checked here and not in the UI
+     *
+     * `cachedIds` already tells the row that the book is cached, but that set is a
+     * *snapshot*: the cache is in `cacheDir` and Android may evict it, the user may
+     * clear it from 设置, and an earlier failed transfer may have left a file whose
+     * size no longer matches the repository's. The decision to skip the network
+     * therefore has to be made against the file that exists at this moment, which is
+     * what [OnlineCache.take] does -- it re-checks `isUsable` and removes residue.
+     *
+     * A failure here is not an error: the file may have been evicted between the
+     * check and the rename, and the honest fallback is simply to download it.
+     */
+    private suspend fun adoptCachedCopy(book: Book): Book? {
+        val c = cache ?: return null
+        return try {
+            // Reuse the book's own shelf target so the file lands exactly where a
+            // downloaded copy would, then register it as one.
+            val target = store.targetFileFor(book)
+            val taken = c.take(book, target) ?: return null
+            val record = store.register(book, taken, taken.length())
+            // `register` bumps the shelf revision, so the shelf screen picks the
+            // new book up without a manual refresh.
+            record
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     /** Remove the remains of an interrupted download. */
     private fun cleanupPartial(book: Book) {
         runCatching {
@@ -343,7 +401,6 @@ class OnlineLibrary(
             File(target.parentFile, target.name + ".part").delete()
         }
     }
-
     /**
      * Update a download's state on the main dispatcher.
      *

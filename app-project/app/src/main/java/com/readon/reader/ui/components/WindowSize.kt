@@ -8,6 +8,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import com.readon.reader.ui.Adapt
 
 /**
@@ -58,12 +59,26 @@ val LocalWindowSize = staticCompositionLocalOf { WindowSize(400, 800) }
  *
  * The `BoxWithConstraints` is only a measurement host: it fills its parent and its single
  * child is the app, so inserting this at the root cannot change what the app looks like.
+ *
+ * ## Why the constraints are converted to dp here
+ *
+ * `constraints.maxWidth` is in **pixels**, and [WindowSize] is documented in **dp** --
+ * every consumer feeds it straight into [Adapt], whose breakpoints are 600 dp and 840 dp.
+ * Handing the raw pixel count over therefore multiplied the measured width by the
+ * display density: a 393 dp phone at 2.75x reports ~1080, which is `Expanded`, so the
+ * phone took the tablet path on every device. That is the bug that made 主页 render the
+ * wide layout on a phone; converting at this one boundary is what makes the value match
+ * its own documentation.
  */
 @Composable
 fun ProvideWindowSize(content: @Composable () -> Unit) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val size = remember(constraints.maxWidth, constraints.maxHeight) {
-            WindowSize(constraints.maxWidth, constraints.maxHeight)
+        val density = LocalDensity.current
+        val size = remember(constraints.maxWidth, constraints.maxHeight, density) {
+            WindowSize(
+                widthDp = with(density) { constraints.maxWidth.toDp().value.toInt() },
+                heightDp = with(density) { constraints.maxHeight.toDp().value.toInt() },
+            )
         }
         CompositionLocalProvider(LocalWindowSize provides size, content = content)
     }

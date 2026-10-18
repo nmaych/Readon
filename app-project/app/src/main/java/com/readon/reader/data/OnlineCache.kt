@@ -106,6 +106,65 @@ class OnlineCache(private val context: Context) {
     }
 
     /**
+     * Move the cached copy of [book] to [target], handing it over to the shelf.
+     *
+     * Returns the file now at [target] on success, or null when the cache has
+     * nothing usable for this book -- in which case the caller must download.
+     *
+     * ## Why a move and not a copy
+     *
+     * The destination is the shelf's own file, in `filesDir`, and the source is in
+     * `cacheDir`: both are inside the app's private storage and therefore on the
+     * same filesystem, so this is a rename. A copy would need a second full-size
+     * buffer on disk at the moment of the move (75 MB for this library's largest
+     * book) for no benefit, because the cache entry is removed either way.
+     *
+     * The rename is also what makes this atomic from the shelf's point of view: the
+     * file is either absent or complete at [target], never half-written. A rename
+     * that the filesystem refuses falls back to copy-then-delete, which is slower
+     * but still ends with exactly one copy.
+     *
+     * ## Why `isUsable` is re-checked here
+     *
+     * [cachedIds] may have told the UI that this book is cached minutes ago. Since
+     * then Android may have evicted `cacheDir`, the user may have cleared the cache,
+     * or a previous version of the book may have left a mismatched file. Deciding
+     * from the file that exists *now* is the only answer that cannot be stale, and a
+     * residue file is deleted rather than moved.
+     */
+    suspend fun take(book: Book, target: File): File? = withContext(Dispatchers.IO) {
+        val source = fileFor(book)
+        if (!OnlineCachePolicy.adoptable(source.length(), book.size)) {
+            // Residue -- an interrupted write, or an empty file. Removing it here is
+            // what keeps a later scan from reporting it as cached.
+            if (source.exists()) runCatching { source.delete() }
+            return@withContext null
+        }
+        target.parentFile?.mkdirs()
+        // A previous download of the same book may already be there; the rename
+        // replaces it, but some filesystems refuse to rename onto an existing file.
+        if (target.exists()) runCatching { target.delete() }
+        val moved = runCatching { source.renameTo(target) }.getOrDefault(false)
+        if (!moved) {
+            val copied = runCatching {
+                source.copyTo(target, overwrite = true)
+                source.delete()
+                true
+            }.getOrDefault(false)
+            if (!copied) {
+                // Neither path worked: leave the cache entry alone (it is still a
+                // valid cache hit) and let the caller download, so a read-only
+                // corner of the filesystem cannot lose the book outright.
+                return@withContext null
+            }
+        }
+        // The staging `.part`, if any, is now a fragment of a book that lives on the
+        // shelf. Leaving it would make `trim` account for bytes nobody can use.
+        runCatching { File(dir, partNameFor(book)).delete() }
+        target
+    }
+
+    /**
      * Where a fresh download should be written before it is promoted.
      *
      * A sibling `.part` file, promoted by [commit] once the bytes are complete.

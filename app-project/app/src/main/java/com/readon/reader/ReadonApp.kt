@@ -121,6 +121,15 @@ class ReadonApp : Application() {
         updates = UpdateManager(this, prefs, github)
         library = OnlineLibrary(prefs, github, store, appScope, onlineCache)
         updateCenter = UpdateCenter(prefs, updates, appScope)
+
+        // A downloaded update APK is dead weight once the version it installed is
+        // running, and nothing else ever removes it: the next download clears the
+        // directory first, so a user who updates once and then stops keeps that
+        // 11 MB forever. Startup is the first moment this code can know the install
+        // succeeded -- the installer replaces the app, so the old version never gets
+        // to run again after the user taps 安装. Off the main thread because it is
+        // filesystem work.
+        appScope.launch(Dispatchers.IO) { updates.clearDownloadedPackages() }
     }
 
     /**

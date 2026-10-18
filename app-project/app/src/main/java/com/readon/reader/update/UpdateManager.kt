@@ -289,6 +289,41 @@ class UpdateManager(
         context.startActivity(intent)
     }
 
+    /**
+     * Delete the downloaded update packages.
+     *
+     * ## Why this is called on every start
+     *
+     * The update APK is ~11 MB kept in `cacheDir/updates`. Android *may* reclaim
+     * `cacheDir` under storage pressure, but "may" is not a promise: on a phone that
+     * never runs short of space the file stays indefinitely, and every release adds
+     * another one -- the directory is cleared before a new download, so the old file
+     * only goes when a *newer* update is fetched, which never happens for a user who
+     * installs from the store or stops updating.
+     *
+     * Once the new version is running, the package it was installed from is dead
+     * weight: the installed copy is what runs, and the APK cannot even be reused for a
+     * reinstall after an uninstall (the signature check passes but the file is a
+     * different version's). So the app deletes it at startup, which is the first
+     * moment it can know the install succeeded -- the installer process replaces this
+     * app's code, so no code inside the *old* version gets to run after the user taps
+     * 安装.
+     *
+     * Safe to call at any time: an empty or missing directory is not an error, and a
+     * file locked by the system installer is left for the next start rather than
+     * reported.
+     */
+    fun clearDownloadedPackages() {
+        val dir = File(context.cacheDir, "updates")
+        if (!dir.isDirectory) return
+        dir.listFiles()?.forEach { file ->
+            // Best effort: a file the installer still holds open cannot be deleted on
+            // some devices, and that is not a failure worth surfacing.
+            runCatching { file.delete() }
+        }
+        runCatching { dir.delete() }
+    }
+
     private fun sha256Of(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->

@@ -44,6 +44,14 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.AutoStories
+import androidx.compose.material.icons.filled.Battery1Bar
+import androidx.compose.material.icons.filled.Battery2Bar
+import androidx.compose.material.icons.filled.Battery3Bar
+import androidx.compose.material.icons.filled.Battery4Bar
+import androidx.compose.material.icons.filled.Battery5Bar
+import androidx.compose.material.icons.filled.Battery6Bar
+import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material.icons.filled.BatteryFull
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Bookmarks
@@ -108,12 +116,14 @@ import com.readon.reader.data.ReaderInk
 import com.readon.reader.data.UnsupportedBookException
 import com.readon.reader.reader.AutoRead
 import com.readon.reader.reader.Paginator
+import com.readon.reader.reader.ReaderHud
 import com.readon.reader.reader.ReaderState
 import com.readon.reader.reader.TextFlow
 import com.readon.reader.reader.TextPaginator
 import com.readon.reader.ui.Adapt
 import com.readon.reader.ui.collectAsStateSafe
 import com.readon.reader.ui.components.EmptyState
+import com.readon.reader.ui.components.rememberStatusReadout
 import com.readon.reader.ui.theme.ReaderFont
 import com.readon.reader.ui.theme.ReaderPalette
 import com.readon.reader.ui.theme.ReaderSkin
@@ -443,17 +453,17 @@ private fun ReaderBody(
 
     val verticalPadding = 16.dp
 
+    // The clock and the battery, drawn by the reader itself because it hides the
+    // phone's status bar. Read once here so the top and bottom lines share one
+    // reading rather than each registering its own receiver.
+    val readout = rememberStatusReadout()
+
     /**
      * The blank space kept above the body text.
      *
      * The reader hides the phone's status bar for the whole visit (see the
-     * `DisposableEffect` in [ReaderScreen]), so the body text no longer has a clock
-     * and a battery to clear. It still needs a margin: text starting at the very
-     * top edge of the screen reads as a rendering mistake, and on a phone with a
-     * notch or a punch-hole the camera is *physically* in the way whatever the
-     * system bars are doing.
-     *
-     * So the clearance is two things added together:
+     * `DisposableEffect` in [ReaderScreen]) and replaces it with its own line
+     * ([ReaderStatusHeader]), so the clearance above the body is:
      *
      *   * **The display cutout**, because that is a hardware obstruction and not a
      *     bar that can be hidden. It is measured from the cutout rather than from
@@ -461,19 +471,26 @@ private fun ReaderBody(
      *     inset as the *visible* inset, which is zero while the bar is hidden -- so
      *     sizing this from the status bar would silently collapse to the bare
      *     minimum on every device, which is exactly the bug this replaced.
-     *   * **One real line of body text**, derived from the reader's own font size
-     *     and line spacing rather than a fixed number of dp, because the promise is
-     *     a blank line and a fixed 14 dp is less than half of one at 30 sp.
+     *   * **The reader's own status line**, which is where the chapter name lives
+     *     now that there is no system bar to carry it.
      *
-     * The two are added, not maxed: the blank space is meant to be *visible*, and
-     * taking the larger of the two would leave the first line flush against the
-     * bottom of the notch.
+     * A small gap is added so the first line of text does not sit flush against the
+     * status line, which at 30 sp would read as one run of text.
      */
     val topInset = with(density) {
         val cutout = WindowInsets.displayCutout.getTop(this).toDp()
-        val blankLine = (fontSize * lineSpacing).sp.toDp()
-        cutout + maxOf(blankLine, MIN_TOP_BLANK)
+        cutout + HUD_LINE_HEIGHT + HUD_TEXT_GAP
     }
+
+    /**
+     * The clearance kept below the body text, for the footer line.
+     *
+     * Same reasoning at the other end: the footer shows the position and the clock,
+     * and the last line of a page must not be drawn underneath it. Measured from a
+     * constant rather than from the navigation-bar inset, which is zero here because
+     * that bar is hidden too.
+     */
+    val bottomInset = HUD_LINE_HEIGHT + HUD_TEXT_GAP + CHROME_EDGE_MIN
 
     /**
      * Move to a chapter.
@@ -540,11 +557,11 @@ private fun ReaderBody(
 
         val pageWidthPx = with(density) { textWidthDp.dp.roundToPx() }
         val pageHeightPx = with(density) {
-            // The top inset is part of the page's padding, so it has to come out
+            // Both insets are part of the page's padding, so they have to come out
             // of the measured height as well: paginating against the full height
-            // would produce pages whose last line is drawn under the status bar
-            // -- measured as fitting, and then clipped.
-            (constraints.maxHeight - (verticalPadding * 2 + topInset).toPx()).toInt()
+            // would produce pages whose last line is drawn under the footer --
+            // measured as fitting, and then clipped.
+            (constraints.maxHeight - (verticalPadding * 2 + topInset + bottomInset).toPx()).toInt()
         }
 
         // The paginator is built here rather than inside [PagedReader] because the
@@ -600,6 +617,7 @@ private fun ReaderBody(
                 horizontalPadding = horizontalPadding,
                 verticalPadding = verticalPadding,
                 topInset = topInset,
+                bottomInset = bottomInset,
                 autoReadSeconds = autoReadSeconds,
                 goToChapter = ::goToChapter,
             )
@@ -614,9 +632,36 @@ private fun ReaderBody(
                 horizontalPadding = horizontalPadding,
                 verticalPadding = verticalPadding,
                 topInset = topInset,
+                bottomInset = bottomInset,
                 autoReadSeconds = autoReadSeconds,
             )
         }
+
+        // --- the reader's own status lines ---------------------------------
+        //
+        // Drawn *under* the chrome (below this block) so a toolbar that appears over
+        // them covers them rather than the other way round, and drawn whether or not
+        // the chrome is showing: they replace the phone's status bar, which is hidden
+        // for the whole visit, so they are the only clock and battery the reader has.
+        //
+        // Faded out while the toolbar is up: the toolbar names the same chapter in
+        // larger type, and two copies of it one above the other reads as a bug.
+        ReaderStatusHeader(
+            chapterTitle = content.chapters.getOrNull(state.chapterIndex)?.title,
+            bookTitle = book.title,
+            skin = skin,
+            visible = !state.chromeVisible,
+            modifier = Modifier.align(Alignment.TopCenter),
+        )
+
+        ReaderStatusFooter(
+            fraction = state.readingFraction(),
+            readout = readout,
+            skin = skin,
+            visible = !state.chromeVisible,
+            bottomInset = bottomInset,
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
 
         // --- chrome --------------------------------------------------------
         AnimatedVisibility(
@@ -772,6 +817,7 @@ private fun PagedReader(
     horizontalPadding: androidx.compose.ui.unit.Dp,
     verticalPadding: androidx.compose.ui.unit.Dp,
     topInset: androidx.compose.ui.unit.Dp,
+    bottomInset: androidx.compose.ui.unit.Dp,
     autoReadSeconds: Int,
     goToChapter: (Int, Boolean) -> Unit,
 ) {
@@ -917,11 +963,11 @@ private fun PagedReader(
             .padding(
                 start = horizontalPadding,
                 end = horizontalPadding,
-                // The top inset is added to the usual vertical padding: the text
-                // has to clear the phone's status bar whether or not the reader's
-                // own top bar is showing.
+                // The insets are added to the usual vertical padding: the text has
+                // to clear the reader's own status line above and footer below,
+                // both of which are drawn over the page.
                 top = verticalPadding + topInset,
-                bottom = verticalPadding,
+                bottom = verticalPadding + bottomInset,
             )
             .pointerInput(paginator, state.chapterIndex) {
                 detectTapGestures { offset ->
@@ -973,6 +1019,7 @@ private fun ScrollReader(
     horizontalPadding: androidx.compose.ui.unit.Dp,
     verticalPadding: androidx.compose.ui.unit.Dp,
     topInset: androidx.compose.ui.unit.Dp,
+    bottomInset: androidx.compose.ui.unit.Dp,
     autoReadSeconds: Int,
 ) {
     // The block split is a full pass over the book -- roughly 160 ms for 8M
@@ -1169,16 +1216,17 @@ private fun ScrollReader(
             // plumbing the chrome's measured height back into the list -- is a
             // composition-time loop for a constant.
             //
-            // Top: the reader's own blank space (`topInset`, which is the cutout
-            // plus a line of text -- the status bar is hidden, so it contributes
-            // nothing) and the top bar's own height (~60 dp of content) on top of
-            // that. Bottom: the progress bar, the position row and the action row
-            // (~74 dp), plus the bottom chrome margin.
+            // Top: the reader's own status line (`topInset`) and the top bar's own
+            // height (~60 dp of content) on top of that. Bottom: whichever covers
+            // more of the column, the footer status line or the chrome's progress
+            // bar, position row and action row (~92 dp) -- `maxOf`, not a sum, so
+            // the last paragraph is not left stranded well above the bottom edge
+            // when only the footer is showing.
             contentPadding = PaddingValues(
                 start = horizontalPadding,
                 end = horizontalPadding,
                 top = verticalPadding + topInset + 60.dp,
-                bottom = verticalPadding + 92.dp,
+                bottom = verticalPadding + maxOf(bottomInset, 92.dp),
             ),
         ) {
             itemsIndexed(ready) { _, block ->
@@ -1205,15 +1253,32 @@ private fun ScrollReader(
 private const val SENTINEL_LAST_PAGE = Int.MAX_VALUE / 2
 
 /**
- * The floor under the blank line kept above the body text.
+ * The height of one line of the reader's own status text.
  *
- * The blank line is normally one line of body text (see `topInset`), which scales
- * with the reader's font size. This is the floor for the case where that would be
- * too little to read as a margin at all -- the smallest font size the reader
- * offers is 12 sp, and a page whose first line is a hair under the top edge looks
- * like a layout mistake rather than a margin.
+ * Fixed rather than derived from the reading font size: these two lines are chrome, not
+ * body text, and they must not grow when the reader turns the page text up to 30 sp --
+ * a 30 sp chapter heading across the top of the page would cost a third of a screen.
+ * The body's insets are computed from this, so the two always agree.
  */
-private val MIN_TOP_BLANK = 14.dp
+private val HUD_LINE_HEIGHT = 18.dp
+
+/**
+ * The line height of the status text itself.
+ *
+ * `sp`, not `dp`: this goes to `Text`'s `lineHeight`, which is a text unit and scales
+ * with the user's font-size setting, whereas [HUD_LINE_HEIGHT] is a layout figure used
+ * for the insets. The two are the same number, which is what keeps the reserved band
+ * and the text drawn inside it in agreement.
+ */
+private val HUD_TEXT_LINE = 18.sp
+
+/**
+ * The gap between a status line and the body text.
+ *
+ * Small, because the status line is already a margin: the body text used to clear a
+ * blank line of its own, and that blank line is now the line carrying the chapter name.
+ */
+private val HUD_TEXT_GAP = 8.dp
 
 /**
  * The smallest margin the reader's own chrome keeps from the top and bottom edges.
@@ -1246,6 +1311,156 @@ private fun Modifier.readerTopChrome(): Modifier =
  */
 private fun Modifier.readerBottomChrome(): Modifier =
     this.padding(bottom = CHROME_EDGE_MIN)
+
+/**
+ * The line where the phone's status bar used to be: which chapter is being read.
+ *
+ * ## Why this exists
+ *
+ * 1.0.7 hid both system bars so the whole window could be the page, and that is right
+ * -- but it also took the clock, the battery and the app's own sense of place with it.
+ * The chapter name is the one piece of that the reader actually needs: it is how you
+ * know where you are in a novel, and the reader's toolbar -- which does show it -- is
+ * hidden while you read.
+ *
+ * So it is drawn here, in the reader's own colours and font, above the body text. The
+ * body's top inset is measured from [HUD_LINE_HEIGHT], so the first line of prose can
+ * never end up underneath it.
+ *
+ * ## Why it disappears when the toolbar appears
+ *
+ * The toolbar shows the same chapter name, in larger type, a few dp below this line.
+ * Two copies of one string stacked on top of each other reads as a rendering bug rather
+ * than as chrome, so this fades out while the toolbar is up and back in when it goes.
+ *
+ * The chapter name is preferred over the book's title because it is the thing that
+ * changes as you read; a book with no detected outline falls back to the title rather
+ * than showing an empty strip.
+ */
+@Composable
+private fun ReaderStatusHeader(
+    chapterTitle: String?,
+    bookTitle: String,
+    skin: ReaderSkin,
+    visible: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(),
+        exit = fadeOut(),
+        modifier = modifier,
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .readerTopChrome()
+                .padding(horizontal = 22.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = chapterTitle?.takeIf { it.isNotBlank() } ?: bookTitle,
+                color = skin.secondaryText,
+                fontSize = 12.sp,
+                lineHeight = HUD_TEXT_LINE,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/**
+ * The line where the phone's navigation bar used to be: position on the left, the clock
+ * and the battery on the right.
+ *
+ * The two halves answer the two questions a reader glances down for. On the left, how
+ * far through the book they are -- the same fraction the progress bar draws, so the two
+ * cannot disagree. On the right, what time it is and whether the phone is about to die,
+ * which is exactly what the hidden status bar used to say and the reason it was missed.
+ *
+ * The battery is tinted only when it is low *and* not charging ([ReaderHud.isLowBattery]);
+ * a phone on a charger at 5% is not a problem worth colouring red.
+ *
+ * The footer sits above the bottom edge by `bottomInset`, which is the same figure the
+ * body reserves, so the last line of a page never ends up behind it.
+ */
+@Composable
+private fun ReaderStatusFooter(
+    fraction: Float,
+    readout: com.readon.reader.ui.components.StatusReadout,
+    skin: ReaderSkin,
+    visible: Boolean,
+    bottomInset: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier,
+) {
+    val lowBattery = ReaderHud.isLowBattery(readout.batteryLevel, readout.charging)
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(),
+        exit = fadeOut(),
+        modifier = modifier,
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(bottom = bottomInset)
+                .padding(horizontal = 22.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = ReaderHud.progressText(fraction),
+                color = skin.secondaryText,
+                fontSize = 11.sp,
+                lineHeight = HUD_TEXT_LINE,
+            )
+            Spacer(Modifier.weight(1f))
+            readout.clock?.let { clock ->
+                Text(
+                    text = clock,
+                    color = skin.secondaryText,
+                    fontSize = 11.sp,
+                    lineHeight = HUD_TEXT_LINE,
+                )
+                Spacer(Modifier.width(10.dp))
+            }
+            Icon(
+                imageVector = batteryIcon(readout.batteryLevel, readout.charging),
+                contentDescription = null,
+                tint = if (lowBattery) MaterialTheme.colorScheme.error else skin.secondaryText,
+                modifier = Modifier.size(13.dp),
+            )
+            Spacer(Modifier.width(3.dp))
+            Text(
+                text = ReaderHud.batteryText(readout.batteryLevel),
+                color = if (lowBattery) MaterialTheme.colorScheme.error else skin.secondaryText,
+                fontSize = 11.sp,
+                lineHeight = HUD_TEXT_LINE,
+            )
+        }
+    }
+}
+
+/**
+ * The battery glyph for a level.
+ *
+ * Deliberately the platform's own battery icons rather than a hand-drawn vector: they are
+ * the shape the user already recognises from the status bar this line replaces, and the
+ * charging variant is the one thing a level alone cannot say.
+ */
+private fun batteryIcon(
+    level: Int,
+    charging: Boolean,
+): androidx.compose.ui.graphics.vector.ImageVector = when {
+    charging -> Icons.Filled.BatteryChargingFull
+    level >= 95 -> Icons.Filled.BatteryFull
+    level >= 70 -> Icons.Filled.Battery6Bar
+    level >= 50 -> Icons.Filled.Battery5Bar
+    level >= 35 -> Icons.Filled.Battery4Bar
+    level >= 20 -> Icons.Filled.Battery3Bar
+    level >= 10 -> Icons.Filled.Battery2Bar
+    else -> Icons.Filled.Battery1Bar
+}
 
 /**
  * One frame, for the wait when the column has not been measured yet.

@@ -578,11 +578,17 @@ private fun NarrowBookList(
  * containers, which either lose laziness or fail to measure. `GridItemSpan` is the
  * mechanism meant for exactly this.
  *
+ * The span is therefore declared *per index* through the `span` parameter of `items`,
+ * which is the only place the grid reads it. The earlier version wrapped every entry in
+ * a nested `item(...)` call from inside `items`' content lambda; that content lambda runs
+ * while the item is being composed, long after the grid has built its interval list, so
+ * the nested `item` never reached the layout and the grid rendered nothing at all. This
+ * form emits one item per index, exactly like the phone list.
+ *
  * The column count comes from [Adapt.gridColumns] rather than `GridCells.Adaptive`: the
  * outer column is already capped, so this cannot run away, but the two layouts should
  * agree on how many rows fit and the count has to be assertable on the desktop.
  */
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun WideBookList(
     items: List<HomeItem>,
@@ -611,15 +617,17 @@ private fun WideBookList(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        items(items.size) { index ->
+        items(
+            count = items.size,
+            // A collection header spans the full width; a book takes one cell.
+            span = { index ->
+                if (items[index] is HomeItem.Header) GridItemSpan(maxLineSpan)
+                else GridItemSpan(1)
+            },
+        ) { index ->
             when (val item = items[index]) {
-                is HomeItem.Header ->
-                    this@LazyVerticalGrid.item(span = { GridItemSpan(maxLineSpan) }) {
-                        SectionHeader(title = item.name, count = item.count)
-                    }
-
-                is HomeItem.Row ->
-                    this@LazyVerticalGrid.item { row(item.book) }
+                is HomeItem.Header -> SectionHeader(title = item.name, count = item.count)
+                is HomeItem.Row -> row(item.book)
             }
         }
     }
@@ -798,6 +806,11 @@ private fun LibraryRow(
                     // is a durable state the user asked for, this one is a leftover
                     // that the system may reclaim, and giving them the same green
                     // would overstate it.
+                    //
+                    // Since 1.0.9 pressing 下载 on one of these moves the cached file
+                    // onto the shelf instead of downloading it again, so the label
+                    // says so: "缓存 · 下载即入书架" is the honest description of what
+                    // that button now does.
                     isCached -> {
                         Spacer(Modifier.height(4.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -809,7 +822,7 @@ private fun LibraryRow(
                             )
                             Spacer(Modifier.width(4.dp))
                             Text(
-                                "已缓存 · 可直接打开",
+                                "已缓存 · 下载即入书架",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

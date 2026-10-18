@@ -73,7 +73,7 @@ REM The compiler needs its own dependencies on the classpath; the code under tes
 REM only needs the stdlib.
 set "COMPILER_CP=%KOTLIN_HOME%;%STDLIB%;%TROVE%;%ANNOT%;%SCRIPT_RT%"
 
-echo [info] compiling the app's TextCodec, Chapters, PageCursor, TextFlow, ReaderInk, Bookmarks, OnlineCachePolicy, PartialRead, AutoRead, Markdown, UpdateDecision, ShelfLabels, Adapt and HomeMemory...
+echo [info] compiling the app's TextCodec, Chapters, PageCursor, TextFlow, ReaderInk, Bookmarks, OnlineCachePolicy, PartialRead, AutoRead, ReaderHud, Markdown, UpdateDecision, ShelfLabels, Adapt and HomeMemory...
 REM -no-stdlib/-no-reflect: the compiler is run from a bare jar rather than a Kotlin
 REM distribution, so it must not go looking for a "Kotlin home" it does not have.
 REM The stdlib is supplied explicitly through -cp instead.
@@ -92,6 +92,7 @@ REM Android and Compose types: that freedom is what lets them be checked here.
   "%SRC%\ReaderInk.kt" "%SRC%\Bookmarks.kt" "%SRC%\OnlineCachePolicy.kt" ^
   "%SRC%\PartialRead.kt" "%SRC%\Markdown.kt" "%SRC%\HomeMemory.kt" ^
   "%SRC_READER%\PageCursor.kt" "%SRC_READER%\TextFlow.kt" "%SRC_READER%\AutoRead.kt" ^
+  "%SRC_READER%\ReaderHud.kt" ^
   "%SRC_UPDATE%\UpdateDecision.kt" "%SRC_UI%\Adapt.kt" ^
   "%ROOT%\tools\codec-check\CodecCheck.kt"
 

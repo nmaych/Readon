@@ -78,4 +78,29 @@ object OnlineCachePolicy {
         }
         return doomed
     }
+
+    /**
+     * Should pressing 下载 on a [cachedSize]-byte cache entry hand the file to the
+     * shelf instead of fetching the book again?
+     *
+     * ## Why this is its own name rather than a call to [isUsable]
+     *
+     * The two rules currently agree, and that is worth stating explicitly rather than
+     * leaving as an accident of two identical predicates. [isUsable] answers "may this
+     * file be *read* as the book"; adoption asks a stronger-sounding question -- the
+     * file becomes permanent shelf state -- so a reader of the download path should be
+     * able to see what the answer depends on without re-deriving it.
+     *
+     * What it depends on, and why the unverifiable case is allowed through: the shelf
+     * record is written with the **file's own length** (`BookStore.register` takes the
+     * byte count it actually wrote), not with the repository's figure. So a book whose
+     * size the listing never reported still ends up with a correct shelf record, and
+     * every later cache-hit comparison for it is against that real length. Rejecting
+     * it here would re-download a 75 MB book to avoid a problem that does not exist.
+     *
+     * What is *not* allowed is an empty file: that is the residue of an interrupted
+     * write, and adopting it would put an unreadable book on the shelf.
+     */
+    fun adoptable(cachedSize: Long, expectedSize: Long): Boolean =
+        isUsable(cachedSize, expectedSize)
 }

@@ -5,6 +5,7 @@ import com.readon.reader.data.Markdown
 import com.readon.reader.data.PartialRead
 import com.readon.reader.reader.AutoRead
 import com.readon.reader.reader.PageCursor
+import com.readon.reader.reader.ReaderHud
 import com.readon.reader.reader.TextFlow
 import com.readon.reader.ui.Adapt
 import com.readon.reader.update.UpdateDecision
@@ -1764,6 +1765,116 @@ fun main() {
     // The source key is metadata, not an expressed choice: counting it would make
     // every default view "worth remembering", because every save writes it.
     check("只有书库键时不值得记住", !HomeMemory(sourceKey = key).isMeaningful())
+
+    println()
+    println("== 阅读器自绘状态行 ==")
+
+    // --- clock ---------------------------------------------------------------
+    //
+    // A one-digit minute is the kind of thing that is obvious in a screenshot and
+    // invisible in code review, so the padding is asserted rather than trusted.
+    check("整点补零", ReaderHud.clockText(9, 5) == "09:05", ReaderHud.clockText(9, 5))
+    check("午夜是 00:00", ReaderHud.clockText(0, 0) == "00:00")
+    check("最后一分钟是 23:59", ReaderHud.clockText(23, 59) == "23:59")
+    // A clock that crashes the reader would be worse than one showing a wrong minute.
+    check("小时越界被夹住", ReaderHud.clockText(25, 0) == "23:00", ReaderHud.clockText(25, 0))
+    check("分钟越界被夹住", ReaderHud.clockText(12, 90) == "12:59", ReaderHud.clockText(12, 90))
+    check("负数小时被夹住", ReaderHud.clockText(-3, 7) == "00:07", ReaderHud.clockText(-3, 7))
+    check("时间总是五字符", ReaderHud.clockText(7, 3).length == 5)
+
+    // --- battery -------------------------------------------------------------
+    //
+    // `EXTRA_LEVEL` is -1 when the extra is missing, and a device reporting a level
+    // above its own scale produces a number the user reads as a bug.
+    check("电池百分比带百分号", ReaderHud.batteryText(87) == "87%")
+    check("满电是 100%", ReaderHud.batteryText(100) == "100%")
+    check("未知读数不是 -1%", ReaderHud.batteryText(-1) == "0%", ReaderHud.batteryText(-1))
+    check("超过 100 被夹住", ReaderHud.batteryText(140) == "100%", ReaderHud.batteryText(140))
+
+    // Low *and* not charging: a phone plugged in at 5% is not a problem worth
+    // colouring red, and colouring it would teach the reader to ignore the colour.
+    check("低电量不充电时报警", ReaderHud.isLowBattery(10, charging = false))
+    check("正好 15% 仍算低电量", ReaderHud.isLowBattery(15, charging = false))
+    check("16% 不算低电量", !ReaderHud.isLowBattery(16, charging = false))
+    check("充电时不报警", !ReaderHud.isLowBattery(5, charging = true))
+    check("满电不报警", !ReaderHud.isLowBattery(100, charging = false))
+    check("未知读数不报警", !ReaderHud.isLowBattery(-1, charging = false))
+
+    // --- progress ------------------------------------------------------------
+    //
+    // Floor, not round: 99.6% of a book must read "99%", because "100%" beside
+    // another page of text is a lie the reader will notice.
+    check("开头是 0%", ReaderHud.progressText(0f) == "0%")
+    check("结束是 100%", ReaderHud.progressText(1f) == "100%")
+    check("一半是 50%", ReaderHud.progressText(0.5f) == "50%")
+    check("99.6% 不显示成 100%", ReaderHud.progressText(0.996f) == "99%", ReaderHud.progressText(0.996f))
+    check("超出范围被夹住（大于 1）", ReaderHud.progressText(1.7f) == "100%")
+    check("超出范围被夹住（小于 0）", ReaderHud.progressText(-0.4f) == "0%")
+    // One frame while a partial online read is extended can report NaN.
+    check("NaN 不产生乱码百分比", ReaderHud.progressText(Float.NaN) == "0%", ReaderHud.progressText(Float.NaN))
+
+    println()
+    println("== 已缓存的书移入书架 ==")
+    //
+    // Pressing 下载 on a cached book moves the cached file onto the shelf instead of
+    // downloading it again. `adoptable` is stricter than `isUsable` on purpose: the
+    // shelf record is permanent and carries a size that later cache-hit checks
+    // compare against, so an unconfirmed length must not be adopted even though it
+    // is good enough to *read*.
+    check("大小一致可以移入", OnlineCachePolicy.adoptable(1000, 1000))
+    check("空文件不能移入", !OnlineCachePolicy.adoptable(0, 1000))
+    check("大小不一致不能移入", !OnlineCachePolicy.adoptable(999, 1000))
+    // A book whose size the listing never reported is still adoptable: the shelf
+    // record is written with the file's *own* length, so every later comparison is
+    // against the real figure. Refusing it would re-download 75 MB to avoid a
+    // problem that does not exist.
+    check("仓库没报大小时仍可移入", OnlineCachePolicy.adoptable(1000, 0))
+    check("仓库没报大小时空文件仍不可移入", !OnlineCachePolicy.adoptable(0, 0))
+    // Reading and adopting agree today; asserted so a future divergence is a decision
+    // rather than an accident.
+    check(
+        "可读取性与可移入性一致",
+        listOf(0L, 1L, 1000L).all { size ->
+            OnlineCachePolicy.isUsable(size, 1000) == OnlineCachePolicy.adoptable(size, 1000)
+        },
+    )
+
+    println()
+    println("== 窗口宽度单位 ==")    //
+    // The 1.0.8 regression this guards against: `ProvideWindowSize` published
+    // `constraints.maxWidth` -- which is in *pixels* -- into a value whose every
+    // consumer treats as dp. A 393 dp phone at 2.75x therefore reported ~1080 and was
+    // classified as a tablet, so 主页 took the wide layout on every phone. There is no
+    // Compose in this check, so what is asserted is the arithmetic the conversion
+    // relies on: pixels divided by density must land in the phone class on a phone,
+    // and must only reach the tablet classes on a genuinely wide window.
+    for ((widthPx, density, label) in listOf(
+        Triple(1080, 2.75f, "393dp 手机"),
+        Triple(1080, 3.0f, "360dp 手机"),
+        Triple(720, 2.0f, "360dp 手机（2x）"),
+        Triple(1440, 3.5f, "411dp 手机"),
+        Triple(2560, 1.5f, "1707dp 平板"),
+    )) {
+        val dp = (widthPx / density).toInt()
+        if (dp < Adapt.MEDIUM_MIN_WIDTH_DP) {
+            check(
+                "像素换算成 dp 后手机仍走窄屏（$label）",
+                Adapt.widthClass(dp) == Adapt.WidthClass.Compact,
+                "${widthPx}px / $density = ${dp}dp",
+            )
+        }
+        // The raw pixel count, which is what 1.0.8 used, must *not* be what the
+        // class is computed from: this asserts the bug was real rather than
+        // theoretical, so the check would fail if someone reintroduced it by
+        // "simplifying" the conversion away.
+        if (widthPx >= Adapt.MEDIUM_MIN_WIDTH_DP && dp < Adapt.MEDIUM_MIN_WIDTH_DP) {
+            check(
+                "直接用像素会被误判成宽屏（$label）",
+                Adapt.widthClass(widthPx).isWide,
+                "${widthPx}px -> ${Adapt.widthClass(widthPx)}",
+            )
+        }
+    }
 
     println()
     if (failures == 0) {

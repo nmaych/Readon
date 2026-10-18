@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -122,11 +123,6 @@ fun SettingsScreen(
     var showClearConfirm by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
 
-    // The full release notes, shown when the card's preview is not enough. Held
-    // here rather than inside the card so the dialog is not clipped by the card's
-    // own bounds.
-    var showNotes by remember { mutableStateOf(false) }
-
     var cachedBytes by remember { mutableStateOf(0L) }
     var onlineCacheBytes by remember { mutableStateOf(0L) }
     var onlineCacheCount by remember { mutableStateOf(0) }
@@ -200,7 +196,6 @@ fun SettingsScreen(
                     onInstall = { _, file -> app.updates.install(file) },
                     onIgnore = { available -> app.updateCenter.ignore(available) },
                     onOpenReleases = { openUrl(context, ReadonLinks.RELEASES, toast) },
-                    onShowNotes = { showNotes = true },
                     onOpenLink = { openUrl(context, it, toast) },
                 )
             }
@@ -713,9 +708,8 @@ fun SettingsScreen(
     // focused, but this covers the case where one is open and focus has moved on
     // -- and it makes "back always closes the topmost thing" true everywhere
     // rather than almost everywhere.
-    BackHandler(enabled = showLibraryEditor || showClearConfirm || showAbout || showNotes) {
+    BackHandler(enabled = showLibraryEditor || showClearConfirm || showAbout) {
         when {
-            showNotes -> showNotes = false
             showAbout -> showAbout = false
             showClearConfirm -> showClearConfirm = false
             showLibraryEditor -> showLibraryEditor = false
@@ -788,48 +782,89 @@ fun SettingsScreen(
             },
         )
     }
+}
 
-    // The full release notes. A dialog rather than a longer card because the
-    // notes for a release like 1.0.6 run to several thousand characters, and a
-    // card that tall would bury the download button and the rest of Settings.
-    val available = (updateState as? UpdateCenter.State.Available)?.info
-    if (showNotes && available != null) {
-        AlertDialog(
-            onDismissRequest = { showNotes = false },
-            title = { Text("更新内容 · ${available.versionName}") },
-            text = {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    MarkdownView(
-                        markdown = available.notes,
-                        textColor = MaterialTheme.colorScheme.onSurface,
-                        secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        accentColor = MaterialTheme.colorScheme.primary,
-                        linkColor = MaterialTheme.colorScheme.primary,
-                        baseSize = 13.sp,
-                        onLink = { openUrl(context, it, toast) },
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showNotes = false }) { Text("好") }
-            },
-        )
+/**
+ * The release notes, in a bounded box that scrolls on its own.
+ *
+ * ## Why a box and not the dialog it replaced
+ *
+ * 1.0.7 rendered the notes inline in the card (truncated to six blocks) and put the
+ * rest behind a 更新内容 button that opened a dialog. Both halves of that were wrong:
+ * the inline copy pushed the 下载更新 button -- the one action the card exists for --
+ * off the bottom of the screen for any substantial release, and the dialog hid the
+ * text that the user was being asked to read *before* deciding to install.
+ *
+ * A fixed-height, independently scrolling box is the honest compromise: the card keeps
+ * its shape and its buttons stay on screen, while the whole changelog is there and
+ * readable by scrolling inside it. No second tap, and no truncation.
+ *
+ * ## Why the height is capped rather than proportional
+ *
+ * `heightIn(max = ...)` rather than a fraction of the window: on a tall phone a
+ * proportional box would be a whole screen of changelog, which is the problem this
+ * replaces. 220 dp is roughly eight lines of the 12 sp body text -- enough to see what
+ * kind of release this is, and clearly a scrollable area rather than a cut-off
+ * paragraph.
+ */
+@Composable
+private fun UpdateNotesBox(
+    notes: String,
+    accent: Color,
+    onLink: (String) -> Unit,
+) {
+    val scroll = rememberScrollState()
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 1.dp,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                // The scroll modifier goes on the same node as the height cap: a
+                // `verticalScroll` on an unconstrained child measures the text at its
+                // full height and then clips, which loses the tail instead of
+                // scrolling it.
+                .heightIn(max = NOTES_BOX_MAX_HEIGHT)
+                .verticalScroll(scroll)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        ) {
+            MarkdownView(
+                markdown = notes,
+                textColor = MaterialTheme.colorScheme.onSurface,
+                secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                accentColor = accent,
+                linkColor = MaterialTheme.colorScheme.primary,
+                baseSize = 12.sp,
+                onLink = onLink,
+            )
+            // A hint that there is more below, shown only when the content actually
+            // overflows: on a one-paragraph release it would be a lie, and a scroll
+            // area with no scrollbar needs something to say it can move.
+            if (scroll.canScrollForward || scroll.canScrollBackward) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "上下滑动查看完整更新内容",
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+            }
+        }
     }
 }
 
 /**
- * How many blocks of the release notes the update card shows before deferring to
- * the dialog.
+ * The tallest the notes box may get, in dp.
  *
- * Enough to say what kind of release this is -- a heading, a paragraph and the
- * first couple of bullets -- and few enough that the card does not push the
- * download button off the screen.
+ * A constant rather than a fraction of the window for the reason in [UpdateNotesBox]:
+ * the point is that the card does not grow to fill the screen. Tall enough for about
+ * eight lines at the 12 sp the notes are set in.
  */
-private const val NOTES_PREVIEW_BLOCKS = 6
+private val NOTES_BOX_MAX_HEIGHT = 220.dp
 
 /** State of the "test the routes" action. */
 private sealed interface ProbeState {
@@ -980,7 +1015,6 @@ private fun UpdateCard(
     onInstall: (UpdateResult.Available, java.io.File) -> Unit,
     onIgnore: (UpdateResult.Available) -> Unit,
     onOpenReleases: () -> Unit,
-    onShowNotes: () -> Unit,
     onOpenLink: (String) -> Unit,
 ) {
     val (accent, title, body) = when (state) {
@@ -1080,29 +1114,25 @@ private fun UpdateCard(
 
                 is UpdateCenter.State.Available -> {
                     Spacer(Modifier.height(10.dp))
-                    // The notes, as Markdown. Truncated to a few blocks so the
-                    // card stays a card; the full text is one tap away.
-                    MarkdownView(
-                        markdown = state.info.notes,
-                        textColor = MaterialTheme.colorScheme.onSurface,
-                        secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        accentColor = accent,
-                        linkColor = MaterialTheme.colorScheme.primary,
-                        baseSize = 12.sp,
-                        maxBlocks = NOTES_PREVIEW_BLOCKS,
-                        onLink = onOpenLink,
-                    )
-                    Spacer(Modifier.height(12.dp))
+                    // The notes, in a bounded scrolling box rather than expanded into
+                    // the card. A release like 1.0.6 runs to several thousand
+                    // characters, so an inline rendering pushed the download button
+                    // and the rest of Settings off the screen; a fixed-height box with
+                    // its own scroll keeps the card a card and still holds the whole
+                    // text, with no second tap needed.
+                    if (state.info.notes.isNotBlank()) {
+                        UpdateNotesBox(
+                            notes = state.info.notes,
+                            accent = accent,
+                            onLink = onOpenLink,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = { onDownload(state.info) }) {
                             Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
                             Text("下载更新")
-                        }
-                        if (state.info.notes.isNotBlank()) {
-                            OutlinedButton(onClick = onShowNotes) {
-                                Text("更新内容")
-                            }
                         }
                         OutlinedButton(onClick = { onIgnore(state.info) }) {
                             Text("忽略此版本")
