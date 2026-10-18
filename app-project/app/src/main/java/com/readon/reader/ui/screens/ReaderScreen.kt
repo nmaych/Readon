@@ -90,6 +90,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -1024,6 +1026,11 @@ private fun PagedReader(
     }
 
     // --- the page ------------------------------------------------------
+    //
+    // Clipped, for the same reason the scrolling mode's window is: a page is measured
+    // to fit between the two status bands, and `clipToBounds` is what makes "measured
+    // to fit" also mean "cannot draw past the edge" when a measurement and a render
+    // disagree by a pixel. Without it the last line could still touch the footer.
     Box(
         Modifier
             .fillMaxSize()
@@ -1032,10 +1039,11 @@ private fun PagedReader(
                 end = horizontalPadding,
                 // The insets are added to the usual vertical padding: the text has
                 // to clear the reader's own status line above and footer below,
-                // both of which are drawn over the page.
+                // both of which are drawn outside this box.
                 top = verticalPadding + topInset,
                 bottom = verticalPadding + bottomInset,
             )
+            .clipToBounds()
             .pointerInput(paginator, state.chapterIndex) {
                 detectTapGestures { offset ->
                     val third = size.width / 3f
@@ -1282,44 +1290,101 @@ private fun ScrollReader(
             ) {
                 CircularProgressIndicator(strokeWidth = 3.dp, color = skin.secondaryText)
             }
-            return@Box
-        }
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            // The chrome is drawn *over* this column, so the first and last
-            // paragraphs have to be pushed clear of it or they are unreadable
-            // behind a translucent bar.
+        } else {
+            // --- the content window -------------------------------------------
             //
-            // The extra clearance belongs to the *chrome*, not to the page, so it is
-            // only applied while the chrome is up and it animates in and out with it.
-            // Before this it was a constant `+60.dp` / `max(.., 92.dp)` on every
-            // frame, which meant a reader whose toolbar was hidden -- the normal state
-            // while reading -- had a 60 dp empty band above the first paragraph and up
-            // to 92 dp below the last one. That is a third of a phone screen spent
-            // reserving room for something that is not drawn.
+            // The prose is confined to this rectangle: inset by the two status bands
+            // and **clipped** to it. That clipping is the actual fix for 状态行遮住正文,
+            // and it is not the same thing as padding.
             //
-            // Top: the status band plus the top bar's own height. Bottom: whichever
-            // covers more of the column, the footer band or the chrome's progress bar,
-            // position row and action row -- `maxOf`, not a sum, so the last paragraph
-            // is not stranded well above the bottom edge when only the footer shows.
-            contentPadding = PaddingValues(
-                start = horizontalPadding,
-                end = horizontalPadding,
-                top = verticalPadding + topInset + chromeTopExtra,
-                bottom = verticalPadding + maxOf(bottomInset, chromeBottomExtra),
-            ),
-        ) {
-            itemsIndexed(ready) { _, block ->
-                // The text between blocks is whitespace only, so drawing the
-                // blocks back to back with a paragraph gap reproduces the
-                // book's own spacing without a run of empty lines.
-                Text(
-                    text = content.text.substring(block.start, block.end),
-                    style = textStyle,
-                    modifier = Modifier
+            // `contentPadding` on the column only moves where the list *starts* and
+            // *ends*. Every paragraph already scrolled past still travels up through
+            // the band and out beyond the top edge, so text was drawn behind the
+            // chapter name and behind the clock the entire time it crossed them --
+            // which is what a reader sees as the status lines sitting on top of the
+            // text. Reserving space cannot fix that, however accurately it is
+            // measured; the drawing has to be bounded. So the band is outside the
+            // scroll container and the container is clipped at its edge, and a line
+            // of text physically cannot reach the band.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(top = topInset, bottom = bottomInset)
+                    .clipToBounds(),
+            ) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    // The chrome is drawn *over* the window, so the first and last
+                    // paragraphs have to be pushed clear of it or they are unreadable
+                    // behind it.
+                    //
+                    // The extra clearance belongs to the *chrome*, not to the page, so
+                    // it is only applied while the chrome is up and it animates in and
+                    // out with it. Before this it was a constant `+60.dp` /
+                    // `max(.., 92.dp)` on every frame, which meant a reader whose
+                    // toolbar was hidden -- the normal state while reading -- had a
+                    // 60 dp empty band above the first paragraph and up to 92 dp below
+                    // the last one. That is a third of a phone screen spent reserving
+                    // room for something that is not drawn.
+                    //
+                    // The status bands are *not* part of this padding any more: they
+                    // are the edge of the window itself (see above), so adding them here
+                    // as well would inset the text twice.
+                    contentPadding = PaddingValues(
+                        start = horizontalPadding,
+                        end = horizontalPadding,
+                        top = verticalPadding + chromeTopExtra,
+                        bottom = verticalPadding + chromeBottomExtra,
+                    ),
+                ) {
+                    itemsIndexed(ready) { _, block ->
+                        // The text between blocks is whitespace only, so drawing the
+                        // blocks back to back with a paragraph gap reproduces the
+                        // book's own spacing without a run of empty lines.
+                        Text(
+                            text = content.text.substring(block.start, block.end),
+                            style = textStyle,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 10.dp),
+                        )
+                    }
+                }
+
+                // --- the edges of the window -----------------------------------
+                //
+                // A short fade into the page colour at each edge. The clip above is
+                // what stops text reaching the status lines; without a fade it cuts the
+                // line that happens to be crossing that edge in half, and half a line of
+                // prose floating just above the clock reads as a rendering fault rather
+                // than as the bottom of the page. Fading it out makes the boundary look
+                // deliberate -- and it is what a reader is used to from every mainstream
+                // reading app, which is the reference this was asked to follow.
+                //
+                // Drawn *over* the column and clipped with it, so the fade can never
+                // itself reach past the window into the status band.
+                Box(
+                    Modifier
+                        .align(Alignment.TopCenter)
                         .fillMaxWidth()
-                        .padding(bottom = 10.dp),
+                        .height(CONTENT_FADE_EDGE)
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(skin.background, skin.background.copy(alpha = 0f)),
+                            )
+                        ),
+                )
+                Box(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(CONTENT_FADE_EDGE)
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(skin.background.copy(alpha = 0f), skin.background),
+                            )
+                        ),
                 )
             }
         }
@@ -1379,6 +1444,15 @@ private val CHROME_TOP_EXTRA = 60.dp
  * [CHROME_TOP_EXTRA] -- only while the bar is drawn.
  */
 private val CHROME_BOTTOM_EXTRA = 92.dp
+
+/**
+ * How tall the fade at the top and bottom of the scrolling content window is.
+ *
+ * Small on purpose. It exists only to soften the clip that keeps text out of the status
+ * bands (see [ScrollReader]); a tall gradient would start to look like a bar of its own,
+ * and would eat into the reading area it is there to protect.
+ */
+private val CONTENT_FADE_EDGE = 16.dp
 
 /**
  * Clearance for the reader's own chrome at the top of the screen.

@@ -15,6 +15,27 @@ rather than trusted.
 
 ## [Unreleased]
 
+## [1.0.11] - 2026-10-18
+
+### Fixed
+
+- **滚动阅读时，正文仍然从上下两条状态行的下面穿过去。** 1.0.10 修的是**预留**：状态行
+  留多高、正文从哪开始。但滚动模式把正文交给一个**铺满全屏**的 `LazyColumn`，只把状态行的
+  高度写进了 `contentPadding`——而 `contentPadding` 只决定列表**首尾**在哪结束，完全不约束
+  已经滚过去的段落。每一行文字仍然会从屏幕顶部一路划过，并且**画在章节名和时钟的下面**，
+  只是最后被屏幕边缘裁掉。所以读者看到的仍然是状态行压在文字上。
+
+  预留空间修不了这件事，无论预留算得多准：**必须约束绘制范围**。现在正文被放进一个裁剪过的
+  窗口——`padding(top = 状态带, bottom = 状态带)` 外面再加 `clipToBounds()`——窗口的上下边
+  就是两条状态行的边，于是文字在物理上**无法**进入那两条带子。不是"通常不会"，是不能。
+  这正是番茄小说这类阅读器的做法：正文只在状态行之间那块矩形里滚动。
+
+  只裁剪还不够：恰好压在窗口边缘上的那一行会被截成半行、浮在时钟上方，看着像渲染错误。
+  所以窗口上下各加一层 16 dp 的**页面色渐隐**，让文字在边界处淡出，边界才显得是刻意的。
+
+  分页模式同样加了裁剪：一页本来就是按两条带子之间的高度量出来的，`clipToBounds()` 让
+  "量得放得下"也等于"画不出去"，即使某次测量与渲染差一个像素，最后一行也不会蹭到页脚。
+
 ## [1.0.10] - 2026-10-18
 
 ### Fixed
@@ -792,7 +813,8 @@ rather than trusted.
 - 设置: reading preferences, app theme, library source, storage management and a
   GitHub update check that verifies the APK's SHA-256 before installing.
 
-[Unreleased]: https://github.com/nmaych/Readon/compare/v1.0.10...HEAD
+[Unreleased]: https://github.com/nmaych/Readon/compare/v1.0.11...HEAD
+[1.0.11]: https://github.com/nmaych/Readon/compare/v1.0.10...v1.0.11
 [1.0.10]: https://github.com/nmaych/Readon/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/nmaych/Readon/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/nmaych/Readon/compare/v1.0.7...v1.0.8

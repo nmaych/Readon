@@ -2,7 +2,7 @@
 
 一个简洁的 Android 阅读器。书籍来自 GitHub 仓库，在线阅读或下载到本地，界面遵循「主页 / 书架 / 设置」三栏结构。
 
-当前版本 **1.0.10**（versionCode 10010）。
+当前版本 **1.0.11**（versionCode 10011）。
 
 ## 功能
 
@@ -71,6 +71,11 @@
     （`18.sp.toDp()`，`sp` 本来就带着字体缩放）算出完整带高，正文按它内缩、状态行在
     同一条带子里绘制。1.0.9 是按 18 dp 预留、按 18 sp 绘制——系统字号 1.3 倍时文字有
     23 dp 高却只占 18 dp 的位置，于是章节名与时间电量盖住了每页的第一行和最后一行
+- **正文只画在状态行之间那块矩形里**：光有预留还不够——滚动模式下正文铺满全屏，预留只决定
+  列表首尾在哪结束，已经滚过去的段落仍会从屏幕顶部划过并画在章节名下面。所以正文被放进一个
+  **裁剪过的窗口**（`padding(上下=状态带)` + `clipToBounds()`），窗口的上下边就是两条状态行
+  的边，文字在物理上进不去那两条带子。窗口上下各有 16 dp 页面色渐隐，免得边界上的那行被截成
+  半行；分页模式同样裁剪，保证「量得放得下」也等于「画不出去」
 - 自动识别章节（`第X章`、`Chapter N`、`楔子/序章/尾声`、Markdown 标题），侧滑目录直达
 - 全书全文搜索，逐条跳转
 - **书签**：底部一键标记当前位置，底部列表可跳转 / 重命名 / 删除；未命名的书签显示该处正文摘要
@@ -209,8 +214,8 @@ UTF-8/GBK/UTF-16、BOM、「ASCII 开头 + GBK 正文」这类会导致乱码的
 
 ```
 build.cmd assembleRelease
-copy app-project\app\build\outputs\apk\release\app-release.apk dist\readon-1.0.10.apk
-python tools\ci_release.py --name 1.0.10 --apk dist\readon-1.0.10.apk
+copy app-project\app\build\outputs\apk\release\app-release.apk dist\readon-1.0.11.apk
+python tools\ci_release.py --name 1.0.11 --apk dist\readon-1.0.11.apk
 python tools\verify_release.py
 ```
 
