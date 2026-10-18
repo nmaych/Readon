@@ -56,6 +56,10 @@ jobs:
         # filesystem or an export step that drops modes would still break here,
         # and "Permission denied" reads like a broken repository rather than a
         # missing mode. One chmod is cheaper than that diagnosis.
+        #
+        # Nothing in this workflow checks out another branch afterwards, so a
+        # dirty tree is harmless here -- unlike in release.yml, which switches to
+        # the default branch to commit the manifest.
         run: chmod +x gradlew
 
       # No signing inputs are provided on purpose. The build script treats

@@ -87,11 +87,26 @@ jobs:
 
       - name: Make the Gradle wrapper executable
         working-directory: app-project
-        # `git update-index --chmod=+x` fixed this for new commits, but a tag that
-        # already exists keeps whatever mode it was cut with -- and this workflow
-        # checks out *the tag*. Re-applying the bit here is what lets an older tag
-        # release, instead of failing with "./gradlew: Permission denied".
-        run: chmod +x gradlew
+        # A tag that already exists keeps whatever mode it was cut with, and this
+        # workflow checks out *the tag* -- so v1.0.9 (cut before the mode was
+        # fixed) still arrives with gradlew at 100644 and fails with
+        # "./gradlew: Permission denied".
+        #
+        # Both halves matter and the order is deliberate:
+        #   * `chmod +x` is what makes the *current run* work;
+        #   * `git update-index --chmod=+x` is what stops that chmod counting as a
+        #     modification. Without it the working tree is dirty, and the
+        #     "Commit the manifest" step's `git checkout -B main` aborts with
+        #     "Your local changes to app-project/gradlew would be overwritten".
+        run: |
+          chmod +x gradlew
+          git update-index --chmod=+x gradlew
+          git update-index --refresh > /dev/null || true
+          if ! git diff --quiet; then
+            echo "::error::the wrapper mode fix left the working tree dirty"
+            git status --short
+            exit 1
+          fi
 
       - name: Decode release keystore
         env:
