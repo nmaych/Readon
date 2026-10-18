@@ -33,6 +33,14 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The action's default is `tools platform-tools`, and Google has removed
+          # the legacy `tools` package from the SDK repository -- sdkmanager then
+          # answers "Warning: Failed to find package 'tools'" and exits 1, which is
+          # what made this job fail on every push since v1.0.7. The build's own SDK
+          # packages are installed by the next step, so only platform-tools is
+          # requested here.
+          packages: 'platform-tools'
 
       - name: Install SDK packages
         run: sdkmanager --install 'platforms;android-34' 'build-tools;34.0.0'
