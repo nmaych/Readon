@@ -71,6 +71,24 @@ object ReaderHud {
     }
 
     /**
+     * Where the reader is, for the footer line: the book percentage, and the chapter
+     * position when the book has an outline.
+     *
+     * `"第 12 / 340 章 · 23%"` answers both "how far through" and "where am I", which
+     * are the two things a reader glances down for. A book with no detected outline
+     * gets the percentage alone rather than a fabricated chapter number.
+     *
+     * The percentage is the *same* [progressText] the progress bar's fraction goes
+     * through, so the two cannot disagree.
+     */
+    fun positionText(fraction: Float, chapterIndex: Int, chapterCount: Int): String {
+        val percent = progressText(fraction)
+        if (chapterCount <= 0 || chapterIndex < 0) return percent
+        val shown = (chapterIndex + 1).coerceIn(1, chapterCount)
+        return "第 $shown / $chapterCount 章 · $percent"
+    }
+
+    /**
      * Whether the battery reading deserves the warning colour.
      *
      * Low **and** not charging: a phone plugged in at 5% is not a problem the reader
@@ -82,4 +100,86 @@ object ReaderHud {
 
     /** Android's low-battery notification threshold, used for the tint decision. */
     const val LOW_BATTERY_LEVEL = 15
+
+    // -----------------------------------------------------------------------
+    //  The bands the two status lines occupy
+    // -----------------------------------------------------------------------
+
+    /** The margin the status lines keep from the screen edge, on a device with no notch. */
+    const val EDGE_DP = 10f
+
+    /** The gap between a status line and the body text. */
+    const val GAP_DP = 8f
+
+    /**
+     * The floor for a status line's height.
+     *
+     * The line's height arrives as a *measured* dp value (18 sp at the current font
+     * scale), and a caller that hands over zero -- a preview, a first frame -- must not
+     * collapse the band and drop the first line of prose under the chapter heading.
+     */
+    const val MIN_LINE_DP = 12f
+
+    /**
+     * How much of the screen the reader's own two status lines take, top and bottom.
+     *
+     * ## Why this is a function rather than two constants in the screen
+     *
+     * It used to be two constants -- `18.dp` for the line and a sum of them for the
+     * band -- while the *text* in those lines was set in `sp`. `sp` scales with the
+     * reader's system font size and `dp` does not, so on a phone with the font size
+     * turned up (which on Chinese Android builds is one slider, commonly set to 1.3x)
+     * the two lines drew 23 dp tall inside an 18 dp reservation, and the body text was
+     * laid out underneath them. That is the reported bug: 上方章节 / 下方时间电量 **盖住**
+     * 正文. The same mismatch made the footer's own bottom margin double as its
+     * clearance, which cost another 18 dp of overlap even at 1.0x.
+     *
+     * So both numbers are derived here from one line height, and the screen is only
+     * allowed to *use* them: the header is padded by [Band.edgeDp] + the line +
+     * [Band.gapDp], the footer by [Band.edgeDp], and the body is inset by
+     * [Band.topDp] / [Band.bottomDp]. Nothing draws outside the band it reserved.
+     *
+     * @param cutoutTopDp the hardware cutout, or the status bar when it is visible.
+     *   A notch is not hidden by hiding the status bar, so it is always taken; using
+     *   `max` of the two means the band also grows on the one frame where the system
+     *   puts the bar back (see the resume handling in the reader).
+     * @param lineDp one line of status text, in dp, **after** the font scale -- i.e.
+     *   `with(density) { 18.sp.toDp() }`, not the literal `18`.
+     */
+    fun band(
+        cutoutTopDp: Float,
+        lineDp: Float,
+        gapDp: Float = GAP_DP,
+        edgeDp: Float = EDGE_DP,
+    ): Band {
+        val line = lineDp.coerceAtLeast(MIN_LINE_DP)
+        val gap = gapDp.coerceAtLeast(0f)
+        val edge = edgeDp.coerceAtLeast(0f)
+        val cutout = cutoutTopDp.coerceAtLeast(0f)
+        return Band(
+            lineDp = line,
+            gapDp = gap,
+            edgeDp = edge,
+            // Top: the cutout, the line's top margin, the line itself, the gap below it.
+            topDp = cutout + edge + line + gap,
+            // Bottom: the line's bottom margin, the line, and the gap above it. The
+            // footer is drawn at `edgeDp` from the bottom edge and the line is part of
+            // the band, so a body inset of this figure clears the text it draws.
+            bottomDp = edge + line + gap,
+        )
+    }
+
+    /**
+     * The reserved top and bottom strips, in dp.
+     *
+     * @property lineDp the line height the band was computed from, so the text drawn
+     *   inside it uses the same measurement the reservation did.
+     */
+    data class Band(
+        val lineDp: Float,
+        val gapDp: Float,
+        val edgeDp: Float,
+        val topDp: Float,
+        val bottomDp: Float,
+    )
 }

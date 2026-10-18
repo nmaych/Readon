@@ -4,6 +4,7 @@ import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -30,6 +31,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -99,11 +101,14 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import com.readon.reader.ReadonApp
 import com.readon.reader.data.Book
 import com.readon.reader.data.BookContent
@@ -322,25 +327,78 @@ fun ReaderScreen(
      * for it -- see `topInset` in [ReaderBody], which measures the blank space from
      * the display cutout and a line of text instead.
      *
+     * ## Why this is a lifecycle observer rather than one `hide()` call
+     *
+     * Hiding once on entry is not enough, and that is the bug this fixes. Android
+     * **re-shows** the system bars on its own whenever the window loses and regains
+     * focus -- coming back from another app, from the home screen, from the
+     * installer, or from a permission dialog -- and a configuration change
+     * (rotation, dark mode from the system panel, font scale) recreates the window
+     * with the bars visible. The reader's `DisposableEffect` was keyed on `book.id`,
+     * which does not change for any of those, so it never ran again: the reader came
+     * back **with the phone's UI on top of the page**, and the only way to get the
+     * immersive view back was to leave the book and re-enter it.
+     *
+     * So the bars are hidden on entry, re-hidden on `ON_RESUME`, and re-hidden again
+     * whenever the window regains focus. Those are the only moments the platform can
+     * undo it: it re-shows the system bars when the window loses and regains focus,
+     * and a configuration change recreates the window with them visible. The effect is
+     * a no-op outside an Activity, which is what previews are.
+     *
      * Keyed on `book.id` and **not** on the reader theme, unlike the icon tints
-     * above: the system can restore the bars on its own (returning from the
-     * installer, a configuration change), so this has to be re-applied per book --
-     * but a theme change happens *while* the reader is sitting there, and keying
+     * above: a theme change happens *while* the reader is sitting there, and keying
      * on it would show the bars and hide them again, a visible flicker, every time
      * the reader switched between 纸白 and 夜间.
      */
     DisposableEffect(book.id) {
-        val window = (context as? android.app.Activity)?.window
+        // `ComponentActivity`, not `Activity`: it is the one that is also a
+        // `LifecycleOwner`, which is what the resume hook below needs. The app's only
+        // activity is one, and a non-activity context (a preview) leaves the bars alone.
+        val activity = context as? androidx.activity.ComponentActivity
+        val window = activity?.window
         val view = window?.decorView
-        if (window == null || view == null) {
+        if (activity == null || window == null || view == null) {
             onDispose { }
         } else {
             val controller = WindowCompat.getInsetsController(window, view)
             val previousBehavior = controller.systemBarsBehavior
             controller.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            controller.hide(WindowInsetsCompat.Type.systemBars())
+
+            // Keep the *content* out from under the bars as well. `enableEdgeToEdge`
+            // in the activity sets `LAYOUT_STABLE | LAYOUT_FULLSCREEN |
+            // LAYOUT_HIDE_NAVIGATION` for the app's own screens, but the reader is
+            // full-bleed by design, so the flags are re-stated here: the page must
+            // reach both screen edges whatever the platform decided while we were
+            // away.
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+
+            val hideBars = { controller.hide(WindowInsetsCompat.Type.systemBars()) }
+            hideBars()
+
+            // `ON_RESUME` is the moment the platform has finished handing the window
+            // back to us; hiding before that can be undone by the very focus change
+            // that triggered it.
+            val owner: LifecycleOwner = activity
+            val observer = object : DefaultLifecycleObserver {
+                override fun onResume(owner: LifecycleOwner) {
+                    hideBars()
+                }
+            }
+            owner.lifecycle.addObserver(observer)
+
+            // The window-focus callback catches the paths the lifecycle observer can
+            // miss -- returning from another app on a device that does not stop the
+            // activity, and the moment after the system re-shows the bars.
+            val focus = view.viewTreeObserver
+            val onFocus = android.view.ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
+                if (hasFocus) hideBars()
+            }
+            if (focus.isAlive) focus.addOnWindowFocusChangeListener(onFocus)
+
             onDispose {
+                if (focus.isAlive) focus.removeOnWindowFocusChangeListener(onFocus)
+                owner.lifecycle.removeObserver(observer)
                 controller.systemBarsBehavior = previousBehavior
                 controller.show(WindowInsetsCompat.Type.systemBars())
             }
@@ -459,38 +517,44 @@ private fun ReaderBody(
     val readout = rememberStatusReadout()
 
     /**
-     * The blank space kept above the body text.
+     * How much of the screen the reader's own two status lines take.
      *
-     * The reader hides the phone's status bar for the whole visit (see the
-     * `DisposableEffect` in [ReaderScreen]) and replaces it with its own line
-     * ([ReaderStatusHeader]), so the clearance above the body is:
+     * Both numbers come from [ReaderHud.band], which is pure arithmetic and checked
+     * on the desktop -- because the bug this replaces was arithmetic. The lines were
+     * reserved at a fixed 18 dp while their text was set at 18 sp, and `sp` grows with
+     * the system font size while `dp` does not: at the 1.3x a lot of Chinese ROMs ship
+     * as "large", the lines drew 23 dp inside an 18 dp reservation and the prose was
+     * laid out *underneath* them. Reported as 上下方显示章节、时间、电量的要遮住小说内容.
      *
-     *   * **The display cutout**, because that is a hardware obstruction and not a
-     *     bar that can be hidden. It is measured from the cutout rather than from
-     *     `WindowInsets.statusBars` on purpose: Compose reports the status-bar
-     *     inset as the *visible* inset, which is zero while the bar is hidden -- so
-     *     sizing this from the status bar would silently collapse to the bare
-     *     minimum on every device, which is exactly the bug this replaced.
-     *   * **The reader's own status line**, which is where the chapter name lives
-     *     now that there is no system bar to carry it.
-     *
-     * A small gap is added so the first line of text does not sit flush against the
-     * status line, which at 30 sp would read as one run of text.
+     * So the line height is the *converted* figure (`18.sp.toDp()`, which already
+     * carries the font scale), and the body is inset by the band derived from it. The
+     * same dp value -- not the `sp` one -- is what [hudTextStyle] gives back to
+     * `lineHeight`.
      */
-    val topInset = with(density) {
-        val cutout = WindowInsets.displayCutout.getTop(this).toDp()
-        cutout + HUD_LINE_HEIGHT + HUD_TEXT_GAP
+    val hudLineDp = with(density) { HUD_LINE.toDp().value }
+
+    // Read at composition, not inside `remember`: window insets are snapshot state, so
+    // reading them here is what makes the band recompute when the system puts a bar
+    // back (see the resume handling in [ReaderScreen]) instead of keeping the band it
+    // measured on the first frame.
+    val topObstructionDp = with(density) {
+        maxOf(
+            WindowInsets.displayCutout.getTop(this),
+            // Zero while the bar is hidden, and its real height on the frame where the
+            // platform has restored it. `max` means that frame is covered by the band
+            // rather than the prose sliding up under the bar.
+            WindowInsets.statusBars.getTop(this),
+        ).toDp().value
+    }
+    val band = remember(hudLineDp, topObstructionDp) {
+        ReaderHud.band(cutoutTopDp = topObstructionDp, lineDp = hudLineDp)
     }
 
-    /**
-     * The clearance kept below the body text, for the footer line.
-     *
-     * Same reasoning at the other end: the footer shows the position and the clock,
-     * and the last line of a page must not be drawn underneath it. Measured from a
-     * constant rather than from the navigation-bar inset, which is zero here because
-     * that bar is hidden too.
-     */
-    val bottomInset = HUD_LINE_HEIGHT + HUD_TEXT_GAP + CHROME_EDGE_MIN
+    /** Above the body text: the notch, the chapter line and the gap below it. */
+    val topInset = band.topDp.dp
+
+    /** Below the body text: the footer line, its bottom margin and the gap above it. */
+    val bottomInset = band.bottomDp.dp
 
     /**
      * Move to a chapter.
@@ -651,15 +715,18 @@ private fun ReaderBody(
             bookTitle = book.title,
             skin = skin,
             visible = !state.chromeVisible,
+            band = band,
             modifier = Modifier.align(Alignment.TopCenter),
         )
 
         ReaderStatusFooter(
             fraction = state.readingFraction(),
+            chapterIndex = state.chapterIndex,
+            chapterCount = content.chapters.size,
             readout = readout,
             skin = skin,
             visible = !state.chromeVisible,
-            bottomInset = bottomInset,
+            band = band,
             modifier = Modifier.align(Alignment.BottomCenter),
         )
 
@@ -1193,6 +1260,17 @@ private fun ScrollReader(
                 }
             },
     ) {
+        // Clearance for the chrome itself, on top of the status bands. Zero while the
+        // chrome is hidden, and animated with it, so a page in the normal reading state
+        // uses the whole screen instead of reserving room for bars that are not drawn.
+        val chromeFraction by animateFloatAsState(
+            targetValue = if (state.chromeVisible) 1f else 0f,
+            animationSpec = tween(180),
+            label = "chromeClearance",
+        )
+        val chromeTopExtra = CHROME_TOP_EXTRA * chromeFraction
+        val chromeBottomExtra = CHROME_BOTTOM_EXTRA * chromeFraction
+
         val ready = blocks
         if (ready == null) {
             // Still splitting. The chrome is drawn over this, so the reader sees
@@ -1211,22 +1289,25 @@ private fun ScrollReader(
             modifier = Modifier.fillMaxSize(),
             // The chrome is drawn *over* this column, so the first and last
             // paragraphs have to be pushed clear of it or they are unreadable
-            // behind a translucent bar. These are the bars' own heights, and they
-            // are duplicated here rather than measured because the alternative --
-            // plumbing the chrome's measured height back into the list -- is a
-            // composition-time loop for a constant.
+            // behind a translucent bar.
             //
-            // Top: the reader's own status line (`topInset`) and the top bar's own
-            // height (~60 dp of content) on top of that. Bottom: whichever covers
-            // more of the column, the footer status line or the chrome's progress
-            // bar, position row and action row (~92 dp) -- `maxOf`, not a sum, so
-            // the last paragraph is not left stranded well above the bottom edge
-            // when only the footer is showing.
+            // The extra clearance belongs to the *chrome*, not to the page, so it is
+            // only applied while the chrome is up and it animates in and out with it.
+            // Before this it was a constant `+60.dp` / `max(.., 92.dp)` on every
+            // frame, which meant a reader whose toolbar was hidden -- the normal state
+            // while reading -- had a 60 dp empty band above the first paragraph and up
+            // to 92 dp below the last one. That is a third of a phone screen spent
+            // reserving room for something that is not drawn.
+            //
+            // Top: the status band plus the top bar's own height. Bottom: whichever
+            // covers more of the column, the footer band or the chrome's progress bar,
+            // position row and action row -- `maxOf`, not a sum, so the last paragraph
+            // is not stranded well above the bottom edge when only the footer shows.
             contentPadding = PaddingValues(
                 start = horizontalPadding,
                 end = horizontalPadding,
-                top = verticalPadding + topInset + 60.dp,
-                bottom = verticalPadding + maxOf(bottomInset, 92.dp),
+                top = verticalPadding + topInset + chromeTopExtra,
+                bottom = verticalPadding + maxOf(bottomInset, chromeBottomExtra),
             ),
         ) {
             itemsIndexed(ready) { _, block ->
@@ -1253,32 +1334,18 @@ private fun ScrollReader(
 private const val SENTINEL_LAST_PAGE = Int.MAX_VALUE / 2
 
 /**
- * The height of one line of the reader's own status text.
+ * The two status lines' *text* height, as a text unit.
  *
- * Fixed rather than derived from the reading font size: these two lines are chrome, not
- * body text, and they must not grow when the reader turns the page text up to 30 sp --
- * a 30 sp chapter heading across the top of the page would cost a third of a screen.
- * The body's insets are computed from this, so the two always agree.
- */
-private val HUD_LINE_HEIGHT = 18.dp
-
-/**
- * The line height of the status text itself.
+ * `sp`, because that is the unit `TextStyle.lineHeight` takes and because it is the
+ * right behaviour: the reader's status line should grow with the system font size the
+ * same way the system's own status bar does.
  *
- * `sp`, not `dp`: this goes to `Text`'s `lineHeight`, which is a text unit and scales
- * with the user's font-size setting, whereas [HUD_LINE_HEIGHT] is a layout figure used
- * for the insets. The two are the same number, which is what keeps the reserved band
- * and the text drawn inside it in agreement.
+ * The band that holds it is computed from this in dp ([ReaderHud.band] takes
+ * `18.sp.toDp()`), so the reservation follows the text. The one thing that must never
+ * happen is feeding this value back into `lineHeight` as `.sp` *again* -- that would
+ * scale it twice and put the status lines back over the prose, which is the bug.
  */
-private val HUD_TEXT_LINE = 18.sp
-
-/**
- * The gap between a status line and the body text.
- *
- * Small, because the status line is already a margin: the body text used to clear a
- * blank line of its own, and that blank line is now the line carrying the chapter name.
- */
-private val HUD_TEXT_GAP = 8.dp
+private val HUD_LINE = 18.sp
 
 /**
  * The smallest margin the reader's own chrome keeps from the top and bottom edges.
@@ -1289,8 +1356,29 @@ private val HUD_TEXT_GAP = 8.dp
  * than a deliberate one, and at the bottom leaves the buttons inside the system's
  * gesture area where a swipe competes with them. The cutout is padded for
  * separately; this is the margin on a device that has neither a bar nor a notch.
+ *
+ * The same figure as [ReaderHud.EDGE_DP], so the status lines and the bars sit on one
+ * vertical line instead of two that are 2 dp apart.
  */
-private val CHROME_EDGE_MIN = 10.dp
+private val CHROME_EDGE_MIN = ReaderHud.EDGE_DP.dp
+
+/**
+ * Extra clearance the reader's top bar needs above the status band.
+ *
+ * One icon button's height (~48 dp) plus its own 4 dp vertical padding, rounded up. Only
+ * reserved while the bar is actually showing -- see the `chromeFraction` in
+ * [ScrollReader] -- because reserving it permanently cost a hidden toolbar's worth of
+ * blank page on every frame of ordinary reading.
+ */
+private val CHROME_TOP_EXTRA = 60.dp
+
+/**
+ * Extra clearance the reader's bottom bar needs above the footer band.
+ *
+ * The progress bar, the position row and the action row: ~92 dp. Same rule as
+ * [CHROME_TOP_EXTRA] -- only while the bar is drawn.
+ */
+private val CHROME_BOTTOM_EXTRA = 92.dp
 
 /**
  * Clearance for the reader's own chrome at the top of the screen.
@@ -1323,9 +1411,16 @@ private fun Modifier.readerBottomChrome(): Modifier =
  * know where you are in a novel, and the reader's toolbar -- which does show it -- is
  * hidden while you read.
  *
- * So it is drawn here, in the reader's own colours and font, above the body text. The
- * body's top inset is measured from [HUD_LINE_HEIGHT], so the first line of prose can
- * never end up underneath it.
+ * ## Why it cannot cover the text
+ *
+ * Its height is [ReaderHud.Band.topDp] -- the *same* figure the body is inset by -- and
+ * the text inside it is set to [ReaderHud.Band.lineDp], so the space reserved and the
+ * line drawn are one number rather than two that were hoped to match. That is exactly
+ * what went wrong in 1.0.9: the band was a `dp` constant while the text was `sp`, and a
+ * raised system font scale made the second larger than the first.
+ *
+ * The chapter name is capped at one line and ellipsised, so the composable can never
+ * grow past its band even if the string is long.
  *
  * ## Why it disappears when the toolbar appears
  *
@@ -1343,26 +1438,31 @@ private fun ReaderStatusHeader(
     bookTitle: String,
     skin: ReaderSkin,
     visible: Boolean,
+    band: ReaderHud.Band,
     modifier: Modifier = Modifier,
 ) {
+    val density = LocalDensity.current
     AnimatedVisibility(
         visible = visible,
         enter = fadeIn(),
         exit = fadeOut(),
         modifier = modifier,
     ) {
-        Row(
+        // The cutout, the edge margin, one line and the gap below it: exactly
+        // `Band.topDp`, which is also what the body is inset by. The bottom of this
+        // composable is therefore the top of the first line of prose.
+        Column(
             Modifier
                 .fillMaxWidth()
-                .readerTopChrome()
-                .padding(horizontal = 22.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                // `displayCutoutPadding`, not `statusBarsPadding`: the status bar is
+                // hidden (so its inset is zero) but a notch is hardware and stays.
+                .displayCutoutPadding()
+                .padding(top = band.edgeDp.dp, bottom = band.gapDp.dp)
+                .padding(horizontal = ReaderHud.EDGE_DP.dp),
         ) {
             Text(
                 text = chapterTitle?.takeIf { it.isNotBlank() } ?: bookTitle,
-                color = skin.secondaryText,
-                fontSize = 12.sp,
-                lineHeight = HUD_TEXT_LINE,
+                style = hudTextStyle(skin.secondaryText, 12.sp, band.lineDp, density),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -1375,71 +1475,119 @@ private fun ReaderStatusHeader(
  * and the battery on the right.
  *
  * The two halves answer the two questions a reader glances down for. On the left, how
- * far through the book they are -- the same fraction the progress bar draws, so the two
- * cannot disagree. On the right, what time it is and whether the phone is about to die,
- * which is exactly what the hidden status bar used to say and the reason it was missed.
+ * far through the book they are and which chapter that is -- the same fraction the
+ * progress bar draws, so the two cannot disagree. On the right, what time it is and
+ * whether the phone is about to die, which is exactly what the hidden status bar used
+ * to say and the reason it was missed.
+ *
+ * ## Why it cannot cover the text
+ *
+ * Its height is [ReaderHud.Band.bottomDp] and the body is inset by the *same* figure,
+ * so the top of this strip is the bottom of the last line of a page. The earlier
+ * version padded `18.dp` (a dp figure) while the text was `sp`; at a raised system font
+ * scale the two lines were taller than their reservation, and again the footer was drawn
+ * over the last line of prose. See [ReaderHud.band].
  *
  * The battery is tinted only when it is low *and* not charging ([ReaderHud.isLowBattery]);
  * a phone on a charger at 5% is not a problem worth colouring red.
- *
- * The footer sits above the bottom edge by `bottomInset`, which is the same figure the
- * body reserves, so the last line of a page never ends up behind it.
  */
 @Composable
 private fun ReaderStatusFooter(
     fraction: Float,
+    chapterIndex: Int,
+    chapterCount: Int,
     readout: com.readon.reader.ui.components.StatusReadout,
     skin: ReaderSkin,
     visible: Boolean,
-    bottomInset: androidx.compose.ui.unit.Dp,
+    band: ReaderHud.Band,
     modifier: Modifier = Modifier,
 ) {
     val lowBattery = ReaderHud.isLowBattery(readout.batteryLevel, readout.charging)
+    val density = LocalDensity.current
     AnimatedVisibility(
         visible = visible,
         enter = fadeIn(),
         exit = fadeOut(),
         modifier = modifier,
     ) {
-        Row(
+        // Symmetric with the header: this column is `Band.bottomDp` tall -- one line,
+        // the gap above it and the bottom margin -- and the body stops above it.
+        Column(
             Modifier
                 .fillMaxWidth()
-                .padding(bottom = bottomInset)
-                .padding(horizontal = 22.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = ReaderHud.progressText(fraction),
-                color = skin.secondaryText,
-                fontSize = 11.sp,
-                lineHeight = HUD_TEXT_LINE,
-            )
-            Spacer(Modifier.weight(1f))
-            readout.clock?.let { clock ->
-                Text(
-                    text = clock,
-                    color = skin.secondaryText,
-                    fontSize = 11.sp,
-                    lineHeight = HUD_TEXT_LINE,
+                .padding(
+                    top = band.gapDp.dp,
+                    bottom = band.edgeDp.dp,
                 )
-                Spacer(Modifier.width(10.dp))
+                .padding(horizontal = ReaderHud.EDGE_DP.dp),
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = ReaderHud.positionText(fraction, chapterIndex, chapterCount),
+                    style = hudTextStyle(skin.secondaryText, 11.sp, band.lineDp, density),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.weight(1f))
+                readout.clock?.let { clock ->
+                    Text(
+                        text = clock,
+                        style = hudTextStyle(skin.secondaryText, 11.sp, band.lineDp, density),
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Icon(
+                    imageVector = batteryIcon(readout.batteryLevel, readout.charging),
+                    contentDescription = null,
+                    tint = if (lowBattery) MaterialTheme.colorScheme.error else skin.secondaryText,
+                    modifier = Modifier.size(13.dp),
+                )
+                Spacer(Modifier.width(3.dp))
+                Text(
+                    text = ReaderHud.batteryText(readout.batteryLevel),
+                    style = hudTextStyle(
+                        if (lowBattery) MaterialTheme.colorScheme.error else skin.secondaryText,
+                        11.sp,
+                        band.lineDp,
+                        density,
+                    ),
+                    maxLines = 1,
+                )
             }
-            Icon(
-                imageVector = batteryIcon(readout.batteryLevel, readout.charging),
-                contentDescription = null,
-                tint = if (lowBattery) MaterialTheme.colorScheme.error else skin.secondaryText,
-                modifier = Modifier.size(13.dp),
-            )
-            Spacer(Modifier.width(3.dp))
-            Text(
-                text = ReaderHud.batteryText(readout.batteryLevel),
-                color = if (lowBattery) MaterialTheme.colorScheme.error else skin.secondaryText,
-                fontSize = 11.sp,
-                lineHeight = HUD_TEXT_LINE,
-            )
         }
     }
 }
+
+/**
+ * The text style for one status line.
+ *
+ * ## The units here are load-bearing
+ *
+ * `lineHeight` takes a **text unit**, and the caller has a height in **dp** (what the
+ * band reserved). Handing the dp number straight back as `.sp` would multiply it by the
+ * font scale a second time: `band.lineDp` is already `18.sp.toDp()`, i.e. 18 at 1x and
+ * 23.4 at 1.3x, and `23.4.sp` at 1.3x means 30.4 dp of line -- taller than the band,
+ * and the prose underneath it again.
+ *
+ * So the dp figure is converted back through the density, which lands on exactly the
+ * `sp` it came from. [Density] is passed in rather than found with `LocalDensity`
+ * because this is called from a plain function, and a composable lookup here would make
+ * the helper composable for no benefit.
+ */
+private fun hudTextStyle(
+    color: Color,
+    size: TextUnit,
+    lineDp: Float,
+    density: Density,
+): TextStyle = TextStyle(
+    color = color,
+    fontSize = size,
+    lineHeight = with(density) { lineDp.dp.toSp() },
+)
 
 /**
  * The battery glyph for a level.

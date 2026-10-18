@@ -1372,12 +1372,29 @@ fun main() {
         // Nothing may be silently dropped: the headings the release is organised
         // under have to come through, or the notes the user reads are shorter than
         // the release's own description.
+        //
+        // Compared against the *source* rather than against a hard-coded list of two
+        // section names. The earlier form required "Added" and "Fixed" specifically,
+        // which was true for the release that happened to be current when it was
+        // written and false for the next one that only had "Fixed" and "Changed" --
+        // so the check failed on a perfectly good manifest, and the natural fix
+        // (editing the literal) would have quietly weakened it to "these two headings
+        // exist" forever. Reading the `### ` lines out of the notes and requiring all
+        // of them to appear is both release-agnostic and stricter.
+        val sourceHeadings = realNotes.lineSequence()
+            .map { it.trim() }
+            .filter { it.startsWith("### ") }
+            .map { it.removePrefix("### ").trim() }
+            .filter { it.isNotEmpty() }
+            .toList()
         val headingTexts = realBlocks.filterIsInstance<Markdown.Block.Heading>().map { it.text }
         check(
-            "真实更新说明的 Added/Fixed 章节都在",
-            headingTexts.contains("Added") && headingTexts.contains("Fixed"),
-            headingTexts.joinToString(),
+            "真实更新说明的每个章节标题都在",
+            headingTexts.containsAll(sourceHeadings),
+            "源 ${sourceHeadings.size} 个（${sourceHeadings.joinToString()}），" +
+                "解析出 ${headingTexts.size} 个（${headingTexts.joinToString()}）",
         )
+        check("真实更新说明至少有一个章节标题", sourceHeadings.isNotEmpty())
         val realSummary = Markdown.summary(realNotes, 100)
         check(
             "真实更新说明的摘要可读（不是标记）",
@@ -1598,7 +1615,7 @@ fun main() {
     // `GridCells.Adaptive` has no ceiling, which is exactly the bug this replaces:
     // a 1200 dp tablet laid out eleven shelf covers across, which is not a bigger
     // shelf but an unreadable contact sheet.
-    check("手机上书架两列", Adapt.gridColumns(360, 12, Adapt.SHELF_TILE_MIN) >= 1)
+    check("手机上书架至少一列", Adapt.gridColumns(360, 12, Adapt.SHELF_TILE_MIN) >= 1)
     check("手机宽度至少有一列", Adapt.gridColumns(200, 12, Adapt.SHELF_TILE_MIN) >= 1)
     check("列数有上限", Adapt.gridColumns(4000, 12, Adapt.SHELF_TILE_MIN) <= Adapt.MAX_GRID_COLUMNS)
     check("极宽窗口不会得到几十列", Adapt.gridColumns(4000, 12, Adapt.SHELF_TILE_MIN) == Adapt.MAX_GRID_COLUMNS)
@@ -1635,6 +1652,116 @@ fun main() {
             cellWidth >= Adapt.BOOK_ROW_MIN - 10,
             "每列 $cellWidth dp",
         )
+    }
+
+    // --- shelf columns -------------------------------------------------------
+    //
+    // The shelf is the one grid where a *wider* window must mean *more books*, not
+    // bigger books. `gridColumns` is fed a minimum tile width, so it always answers
+    // with the fewest legal columns -- which is how a 411 dp phone came to show three
+    // 126 dp covers and the report was "每本书太大". `shelfColumns` starts from a
+    // *target* instead, so a phone lands on 3-4 covers of ~90 dp.
+    check("SHELF 目标宽度在最小与最大之间", Adapt.SHELF_TILE_TARGET > Adapt.SHELF_TILE_MIN)
+
+    for (w in listOf(320, 360, 393, 411, 480, 600)) {
+        // The grid's own content width is the window minus its 16 dp side padding.
+        val content = w - 32
+        val cols = Adapt.shelfColumns(content, 10)
+        val tile = Adapt.shelfTileWidthDp(content, 10)
+        check("手机上书架至少三列（${w}dp 窗口）", cols >= 3, "$cols 列，每列 $tile dp")
+        // Larger than the floor, so titles still fit, but no longer the 126-158 dp
+        // posters the minimum-width arithmetic produced.
+        check(
+            "手机上书架封面不小于 ${Adapt.SHELF_TILE_MIN} dp（${w}dp 窗口）",
+            tile >= Adapt.SHELF_TILE_MIN,
+            "每列 $tile dp",
+        )
+        check(
+            "手机上书架封面不再是巨幅（${w}dp 窗口）",
+            tile <= Adapt.SHELF_TILE_TARGET + 24,
+            "每列 $tile dp",
+        )
+        // Columns plus their gaps must never exceed the width they were computed for.
+        check(
+            "书架列宽加间距不超宽（${w}dp 窗口）",
+            cols * tile + (cols - 1) * 10 <= content,
+            "$cols × $tile + ${cols - 1} × 10 > $content",
+        )
+    }
+
+    // The regression itself, asserted rather than described: on the phone width the
+    // report came from, the old arithmetic produced fewer and therefore larger covers.
+    // A revert to `gridColumns` for the shelf fails this check.
+    run {
+        val content = 411 - 32
+        val oldCols = Adapt.gridColumns(content, 10, 116) // the old SHELF_TILE_MIN
+        val newCols = Adapt.shelfColumns(content, 10)
+        val oldTile = (content - (oldCols - 1) * 10) / oldCols
+        val newTile = Adapt.shelfTileWidthDp(content, 10)
+        check("书架比旧算法多列（411dp 手机）", newCols > oldCols, "新 $newCols 列 vs 旧 $oldCols 列")
+        check("书架封面比旧算法小（411dp 手机）", newTile < oldTile, "$newTile dp vs $oldTile dp")
+    }
+
+    // 320 dp is the narrowest phone still in use. It must not drop below three
+    // columns, because two there means 139 dp covers again.
+    check("320dp 窄屏上仍是三列", Adapt.shelfColumns(288, 10) >= 3, "${Adapt.shelfColumns(288, 10)} 列")
+
+    // The size of a cover must not depend on the window: a tablet shows *more* books,
+    // not bigger ones. Asserted through the same content-column cap the screen applies,
+    // which is what makes it true past 900 dp.
+    for (w in listOf(320, 360, 393, 411, 480, 600, 840, 1200, 1600, 2560)) {
+        val cls = Adapt.widthClass(w)
+        val content = Adapt.contentWidthDp(w, cls) - 32
+        val tile = Adapt.shelfTileWidthDp(content, 10)
+        check(
+            "书架封面大小与窗口无关（${w}dp）",
+            tile in Adapt.SHELF_TILE_MIN..(Adapt.SHELF_TILE_TARGET + 24),
+            "每本 $tile dp（内容 $content dp）",
+        )
+    }
+    // Two windows of the same class must land on the same tile size: that is what
+    // "the cap holds it steady" means, and it is the property a screenshot on one
+    // tablet cannot show.
+    run {
+        val a = Adapt.contentWidthDp(1200, Adapt.widthClass(1200))
+        val b = Adapt.contentWidthDp(2560, Adapt.widthClass(2560))
+        check("超宽窗口的内容列被封顶", a == b, "$a vs $b")
+        check(
+            "超宽窗口上书架封面不再变大",
+            Adapt.shelfTileWidthDp(a - 32, 10) == Adapt.shelfTileWidthDp(b - 32, 10),
+        )
+    }
+
+    // Bounded exactly like the other grid helper: a pre-layout measurement can be
+    // enormous, and dozens of columns is a hitch rather than a shelf.
+    check("书架列数有上限", Adapt.shelfColumns(6000, 10) <= Adapt.SHELF_COLUMNS_MAX)
+    check("书架宽度为 0 时一列", Adapt.shelfColumns(0, 10) == 1)
+    check("书架负宽度时一列", Adapt.shelfColumns(-50, 10) == 1)
+    check("书架列数从不为零", (1..1200 step 7).all { Adapt.shelfColumns(it, 10) >= 1 })
+    // Monotonic: a wider window must never show fewer columns.
+    val shelfCounts = listOf(200, 320, 416, 600, 840, 1200, 1600, 2400).map {
+        Adapt.shelfColumns(it, 10)
+    }
+    check("书架列数随宽度单调不减", shelfCounts == shelfCounts.sorted(), shelfCounts.joinToString())
+    // The tile must stay at or above the floor for every width the app can be given,
+    // which is the invariant the floor exists for -- a narrower tile clips its title.
+    var worstTile = Int.MAX_VALUE
+    for (w in 256..2400 step 3) {
+        val cols = Adapt.shelfColumns(w, 10)
+        val tile = Adapt.shelfTileWidthDp(w, 10)
+        check("书架列数至少一列（${w}dp）", cols >= 1)
+        if (tile < worstTile) worstTile = tile
+    }
+    check(
+        "所有宽度上书架封面都不低于最小宽度",
+        worstTile >= Adapt.SHELF_TILE_MIN,
+        "最窄的封面 $worstTile dp",
+    )
+    // A huge gap must not produce a column count that overflows the window.
+    for (gap in listOf(0, 10, 40)) {
+        val cols = Adapt.shelfColumns(400, gap)
+        val tile = Adapt.shelfTileWidthDp(400, gap)
+        check("书架列宽在间距 $gap 下仍为正", tile > 0, "每列 $tile dp，$cols 列")
     }
 
     // --- reader text column --------------------------------------------------
@@ -1812,6 +1939,82 @@ fun main() {
     check("超出范围被夹住（小于 0）", ReaderHud.progressText(-0.4f) == "0%")
     // One frame while a partial online read is extended can report NaN.
     check("NaN 不产生乱码百分比", ReaderHud.progressText(Float.NaN) == "0%", ReaderHud.progressText(Float.NaN))
+
+    // --- the position line -----------------------------------------------
+    //
+    // "23% · 12/340 章": both facts the footer's left half has to answer.
+    check(
+        "有目录时同时给出章节和百分比",
+        ReaderHud.positionText(0.25f, chapterIndex = 11, chapterCount = 340) == "第 12 / 340 章 · 25%",
+        ReaderHud.positionText(0.25f, chapterIndex = 11, chapterCount = 340),
+    )
+    check(
+        "没有目录时只给百分比",
+        ReaderHud.positionText(0.25f, chapterIndex = -1, chapterCount = 0) == "25%",
+        ReaderHud.positionText(0.25f, chapterIndex = -1, chapterCount = 0),
+    )
+    // A stored chapter index can outlive a revision of the book upstream; the number
+    // shown must stay inside the outline rather than reading "第 400 / 340 章".
+    check(
+        "章节号超出总数时被夹住",
+        ReaderHud.positionText(0.5f, chapterIndex = 399, chapterCount = 340) == "第 340 / 340 章 · 50%",
+        ReaderHud.positionText(0.5f, chapterIndex = 399, chapterCount = 340),
+    )
+    check(
+        "负章节号只显示百分比",
+        ReaderHud.positionText(0.5f, chapterIndex = -5, chapterCount = 340) == "50%",
+        ReaderHud.positionText(0.5f, chapterIndex = -5, chapterCount = 340),
+    )
+
+    // --- the bands the two status lines occupy -----------------------------
+    //
+    // This is the 1.0.10 fix, and it is arithmetic: the lines used to be *reserved*
+    // at 18 dp while their text was *set* at 18 sp. `sp` scales with the system font
+    // size and `dp` does not, so at 1.3x the two lines drew 23 dp inside an 18 dp
+    // reservation and the page was laid out underneath them -- 上方章节 / 下方时间电量
+    // 盖住正文.
+    val band1x = ReaderHud.band(cutoutTopDp = 0f, lineDp = 18f)
+    val band13x = ReaderHud.band(cutoutTopDp = 0f, lineDp = 18f * 1.3f)
+    val band20x = ReaderHud.band(cutoutTopDp = 0f, lineDp = 18f * 2.0f)
+
+    check("顶部预留是 边缘+行高+间隙", band1x.topDp == 10f + 18f + 8f, "${band1x.topDp}")
+    check("底部预留是 行高+间隙+边缘", band1x.bottomDp == 18f + 8f + 10f, "${band1x.bottomDp}")
+    // The regression: the band must grow with the font scale, because the text does.
+    check(
+        "字体放大后预留随之变大",
+        band13x.topDp > band1x.topDp && band13x.bottomDp > band1x.bottomDp,
+        "1x ${band1x.topDp}/${band1x.bottomDp} vs 1.3x ${band13x.topDp}/${band13x.bottomDp}",
+    )
+    check(
+        "字体放大到 2 倍时预留同步翻倍",
+        band20x.lineDp > band13x.lineDp && band20x.topDp > band13x.topDp,
+    )
+    // The actual invariant that makes the bug impossible: the space reserved for a
+    // line is never smaller than the line the text will occupy, at any scale.
+    for (scale in listOf(0.85f, 1.0f, 1.15f, 1.3f, 1.5f, 2.0f)) {
+        val line = 18f * scale
+        val b = ReaderHud.band(cutoutTopDp = 0f, lineDp = line)
+        check(
+            "预留的字号 (${scale}x) 容得下这一行",
+            b.lineDp >= line - 0.001f,
+            "预留 ${b.lineDp} dp，文字 $line dp",
+        )
+        // Top and bottom are each *more* than a line, so the body can never be flush
+        // against the text the band carries.
+        check("顶部留白大于一行 (${scale}x)", b.topDp > b.lineDp)
+        check("底部留白大于一行 (${scale}x)", b.bottomDp > b.lineDp)
+    }
+    // A notch adds to the band; it never replaces part of it.
+    val bandNotch = ReaderHud.band(cutoutTopDp = 32f, lineDp = 18f)
+    check("挖孔加在顶部预留之上", bandNotch.topDp == band1x.topDp + 32f, "${bandNotch.topDp}")
+    check("挖孔不影响底部预留", bandNotch.bottomDp == band1x.bottomDp)
+    // A caller that measures nothing must not collapse the band: on a first frame
+    // `toDp()` can report 0, and a zero-height band puts the prose under the heading.
+    check("行高为 0 时仍保留最小行高", ReaderHud.band(0f, 0f).lineDp == ReaderHud.MIN_LINE_DP)
+    check("行高为负时仍保留最小行高", ReaderHud.band(0f, -40f).lineDp == ReaderHud.MIN_LINE_DP)
+    check("间隙为负时按 0 处理", ReaderHud.band(0f, 18f, gapDp = -5f).gapDp == 0f)
+    check("边缘为负时按 0 处理", ReaderHud.band(0f, 18f, edgeDp = -5f).edgeDp == 0f)
+    check("挖孔为负时按 0 处理", ReaderHud.band(-100f, 18f).topDp == band1x.topDp)
 
     println()
     println("== 已缓存的书移入书架 ==")

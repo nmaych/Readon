@@ -137,8 +137,88 @@ object Adapt {
      */
     const val BOOK_ROW_MIN = 275
 
-    /** A shelf tile: a cover at roughly 2:3 plus a title under it. */
-    const val SHELF_TILE_MIN = 116
+    /**
+     * A shelf tile: a cover at roughly 2:3 plus a title under it.
+     *
+     * This is the *floor*: the narrowest a tile may get before a two-line Chinese
+     * title starts clipping its own ellipsis. It is not the width a tile *wants* --
+     * see [SHELF_TILE_TARGET].
+     */
+    const val SHELF_TILE_MIN = 78
+
+    /**
+     * The width a shelf tile should come out at, in dp.
+     *
+     * ## Why the shelf needs its own arithmetic
+     *
+     * [gridColumns] is fed a *minimum* tile width, so it always answers with the
+     * fewest legal columns: on a 360 dp phone it returned **2** covers of 158 dp for a
+     * 116 dp minimum, and on a 411 dp phone 3 covers of 126 dp. That is the "每本书太大"
+     * report -- the shelf read as a gallery of three giant posters rather than a
+     * library you can scan.
+     *
+     * So the shelf is laid out from a *target* instead: divide the width by roughly
+     * how wide one tile should be, round, and clamp. A phone then gets 3-4 columns of
+     * ~90 dp, which is the size a cover needs to be recognised by colour and a
+     * two-character title, and no larger.
+     */
+    const val SHELF_TILE_TARGET = 96
+
+    /**
+     * A hard ceiling on shelf columns.
+     *
+     * Set at 12 rather than at [MAX_GRID_COLUMNS] because the tiles here are
+     * deliberately small: with the shelf's content column capped by [contentWidthDp],
+     * the most that can ever arise is nine (a 900 dp column at the 96 dp target plus
+     * gaps), so this never binds in normal use. It exists for the same reason as the
+     * other helpers' caps -- a pre-layout measurement can be enormous, and dozens of
+     * columns is a hitch rather than a shelf -- and it is deliberately *not* the thing
+     * that decides the layout: a cap that actually bites is a cap that has started
+     * making covers too big again, which is the bug this whole change is about.
+     */
+    const val SHELF_COLUMNS_MAX = 12
+
+    /**
+     * How many shelf columns [widthDp] should show.
+     *
+     * The rule, in order:
+     *
+     *  1. **Target.** `round(width / (target + gap))` -- what the width "wants" to be
+     *     worth at the intended tile size. Rounding rather than flooring matters: the
+     *     difference between 2 and 3 columns on a 360 dp phone is 158 dp versus 102 dp
+     *     covers, and neither is a rounding error.
+     *  2. **Floor.** Never so many columns that a tile falls below
+     *     [SHELF_TILE_MIN]; a narrower tile than that clips a two-line title. This is
+     *     what keeps a 320 dp phone on three columns instead of the four the target
+     *     would ask for.
+     *  3. **Ceiling.** At most [SHELF_COLUMNS_MAX], so a bogus measurement cannot
+     *     produce a contact sheet.
+     *
+     * Guarantees, all asserted on the desktop: at least 1, monotonic in width, and
+     * never so many columns that a tile drops under the floor.
+     */
+    fun shelfColumns(widthDp: Int, gapDp: Int = 12): Int {
+        if (widthDp <= 0) return 1
+        val gap = gapDp.coerceAtLeast(0)
+        // `+ gap` on both sides so N columns plus their N-1 gaps are what is divided;
+        // otherwise the last gap is counted as usable width.
+        val usable = widthDp + gap
+        val atTarget = Math.round(usable.toFloat() / (SHELF_TILE_TARGET + gap))
+        val atFloor = usable / (SHELF_TILE_MIN + gap)
+        return atTarget
+            .coerceAtMost(atFloor.coerceAtLeast(1))
+            .coerceIn(1, SHELF_COLUMNS_MAX)
+    }
+
+    /** The tile width [shelfColumns] leaves on a window [widthDp] across, in dp. */
+    fun shelfTileWidthDp(widthDp: Int, gapDp: Int = 12): Int {
+        if (widthDp <= 0) return 0
+        val gap = gapDp.coerceAtLeast(0)
+        val cols = shelfColumns(widthDp, gap)
+        // Integer division truncates, which is what a grid does too: the leftover
+        // pixels are distributed to the gutters, not to the tiles.
+        return ((widthDp - (cols - 1) * gap) / cols).coerceAtLeast(0)
+    }
 
     /**
      * A hard ceiling on columns.

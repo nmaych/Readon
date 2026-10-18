@@ -26,7 +26,6 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.automirrored.filled.Sort
@@ -54,7 +53,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -77,6 +75,9 @@ private enum class ShelfSort(val label: String) {
     Author("分类"),
 }
 
+/** The gap between shelf columns, shared by the column arithmetic and the grid. */
+private const val SHELF_GAP_DP = 10
+
 /**
  * The shelf: books that live on the device.
  *
@@ -84,6 +85,11 @@ private enum class ShelfSort(val label: String) {
  * fastest thing to recognise when scanning for "the one I was reading". Sorting
  * defaults to most-recently-read, which keeps the current book in the top-left
  * corner where the eye lands first.
+ *
+ * The tile is deliberately *small*: a cover, a title of at most two lines, and two
+ * lines of meta in one compact column. See [Adapt.SHELF_TILE_TARGET] and
+ * [Adapt.shelfColumns] for why -- the earlier version used a 116 dp *minimum* and no
+ * target, and filled a phone screen with three oversized covers.
  */
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -281,25 +287,44 @@ fun ShelfScreen(
             // `GridCells.Adaptive` has no upper bound: at 1200 dp it lays out eleven
             // covers across, which is not a bigger shelf but a contact sheet --
             // titles too small to read, rows too long to scan. The column count is
-            // therefore computed and capped in [Adapt], and the grid is fixed at it.
+            // therefore computed in [Adapt] and the grid is fixed at it.
+            //
+            // [Adapt.shelfColumns] rather than [Adapt.gridColumns]: the latter feeds
+            // on a *minimum* tile width, so it always answers with the smallest legal
+            // number of columns -- which is what made each cover enormous on a phone
+            // (three 126 dp tiles across a 411 dp window). The shelf function works
+            // from a *target* tile width instead, so a wider window gets more covers
+            // of the same size rather than fewer covers of a bigger one.
+            //
+            // The content column is capped first ([Adapt.contentWidthDp], the same cap
+            // the home screen's list uses) and the leftover becomes a symmetric gutter.
+            // Without that cap a 2560 dp window would either keep growing the tiles
+            // with every extra column or hit the safety ceiling and snap back to
+            // 200 dp covers; with it, a cover is ~96 dp at every window size and a
+            // tablet simply shows more of them.
             val window = LocalWindowSize.current
-            val columns = remember(window.widthDp) {
-                Adapt.gridColumns(
-                    widthDp = window.widthDp - 32, // minus the 16 dp horizontal padding
-                    gapDp = 12,
-                    minColumnDp = Adapt.SHELF_TILE_MIN,
+            val contentWidth = remember(window.widthDp) {
+                Adapt.contentWidthDp(window.widthDp, window.widthClass)
+            }
+            val sideGutter = remember(window.widthDp, contentWidth) {
+                ((window.widthDp - contentWidth).coerceAtLeast(0)) / 2
+            }
+            val columns = remember(contentWidth) {
+                Adapt.shelfColumns(
+                    widthDp = contentWidth - 32, // minus the 16 dp horizontal padding
+                    gapDp = SHELF_GAP_DP,
                 )
             }
 
             LazyVerticalGrid(
                 columns = GridCells.Fixed(columns),
                 contentPadding = PaddingValues(
-                    start = 16.dp,
-                    end = 16.dp,
+                    start = (16 + sideGutter).dp,
+                    end = (16 + sideGutter).dp,
                     top = 4.dp,
                     bottom = contentPadding.calculateBottomPadding() + 24.dp,
                 ),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(SHELF_GAP_DP.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 items(sorted, key = { it.id }) { book ->
@@ -308,7 +333,6 @@ fun ShelfScreen(
                         now = now,
                         onOpen = { onOpen(book) },
                         onLongPress = { pendingDelete = book },
-                        onDelete = { pendingDelete = book },
                     )
                 }
             }
@@ -357,7 +381,6 @@ private fun ShelfItem(
     now: Long,
     onOpen: () -> Unit,
     onLongPress: () -> Unit,
-    onDelete: () -> Unit,
 ) {
     Column(
         Modifier.fillMaxWidth(),
@@ -366,9 +389,13 @@ private fun ShelfItem(
         Box(Modifier.fillMaxWidth()) {
             BookCover(
                 title = book.title,
-                subtitle = book.folder,
+                // The folder used to be drawn *on* the cover. At 96 dp it would take
+                // the title's space for something the reader can already infer from
+                // the book list, so the cover carries only the format badge now.
+                subtitle = null,
                 badge = book.format.uppercase(),
                 progress = book.progress,
+                compact = true,
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(0.68f)
@@ -379,70 +406,54 @@ private fun ShelfItem(
             )
         }
 
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(5.dp))
 
+        // One line of title at 12 sp, two when the title needs it. The cover is
+        // decoration; this is what the reader scans for.
         Text(
             text = book.title,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
+            lineHeight = 15.sp,
             fontWeight = FontWeight.Medium,
             color = MaterialTheme.colorScheme.onBackground,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
 
-        Spacer(Modifier.height(2.dp))
-
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                text = if (book.progress > 0.001f) "${(book.progress * 100).toInt()}%"
-                else "未读",
-                fontSize = 11.sp,
-                color = if (book.progress > 0.001f) MaterialTheme.colorScheme.secondary
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Start,
-            )
-            IconButton(
-                onClick = onDelete,
-                modifier = Modifier.size(24.dp),
-            ) {
-                Icon(
-                    Icons.Filled.Delete,
-                    contentDescription = "删除",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    modifier = Modifier.size(15.dp),
-                )
-            }
-        }
-
-        // The chapter position, when the reader has recorded one. Shown next to
-        // the percentage rather than instead of it: "12/340 章" says where you
-        // are, the percentage says how far through the book that is, and the two
-        // legitimately disagree when chapters are of different lengths.
-        ShelfLabels.chapterProgress(book)?.let { chapters ->
-            Text(
-                text = chapters,
-                fontSize = 10.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
+        // The percentage and the chapter position share one line: "23% · 12/340 章".
+        // Two short facts, and on a 96 dp tile two separate lines cost more height than
+        // they are worth.
+        val chapterText = ShelfLabels.chapterProgress(book)
+        val percent = if (book.progress > 0.001f) "${(book.progress * 100).toInt()}%" else "未读"
+        Text(
+            text = if (chapterText != null) "$percent · $chapterText" else percent,
+            fontSize = 10.sp,
+            lineHeight = 13.sp,
+            color = if (book.progress > 0.001f) MaterialTheme.colorScheme.secondary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
 
         // When the book was last opened. Relative for anything recent, because
         // "今天 14:30" answers "did I read this today?" and a full date does not.
         // A book that has never been opened shows nothing rather than 1970.
-        ShelfLabels.lastReadLine(book.lastReadAt, now)?.let { line ->
-            Text(
-                text = line,
-                fontSize = 10.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
+        val lastRead = ShelfLabels.lastRead(book.lastReadAt, now)
+        Text(
+            // Always present, even when empty: a missing line would make every tile
+            // whose book has never been read 13 dp shorter, and the grid would have
+            // ragged rows.
+            text = lastRead ?: "",
+            fontSize = 10.sp,
+            lineHeight = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
+
+    // The delete action lives on the long-press menu (see the caller) rather than on a
+    // button in every tile. At 96 dp a 24 dp button next to a 10 sp label is a third of
+    // the tile spent on the destructive action, and it is the one action that must not
+    // be easy to hit by accident.
 }

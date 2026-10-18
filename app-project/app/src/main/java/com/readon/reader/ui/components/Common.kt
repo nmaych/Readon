@@ -39,6 +39,10 @@ import com.readon.reader.ui.theme.LocalReadonExtras
  * title set on it: two books never look alike, and the same book always looks
  * the same. That stability is the point -- a cover that changed between launches
  * would make the shelf unreadable at a glance.
+ *
+ * @param compact use the small-cover type scale and a thinner spine. The shelf's
+ *   covers are 96 dp wide, where the 13 sp / 4-line title the home screen's 52 dp
+ *   row uses would leave no room for anything else.
  */
 @Composable
 fun BookCover(
@@ -47,6 +51,7 @@ fun BookCover(
     subtitle: String? = null,
     badge: String? = null,
     progress: Float? = null,
+    compact: Boolean = false,
 ) {
     val extras = LocalReadonExtras.current
     val palette = extras.coverPalette
@@ -64,7 +69,7 @@ fun BookCover(
 
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(if (compact) 8.dp else 10.dp))
             .background(
                 Brush.linearGradient(
                     colors = listOf(pair.first, pair.second),
@@ -82,7 +87,7 @@ fun BookCover(
             Box(
                 Modifier
                     .fillMaxSize()
-                    .width(6.dp)
+                    .width(if (compact) 4.dp else 6.dp)
                     .background(Color.Black.copy(alpha = 0.14f))
             )
         }
@@ -90,16 +95,16 @@ fun BookCover(
         Column(
             Modifier
                 .fillMaxSize()
-                .padding(10.dp),
+                .padding(if (compact) 7.dp else 10.dp),
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
                 text = title,
                 color = Color.White,
-                fontSize = 13.sp,
-                lineHeight = 17.sp,
+                fontSize = if (compact) 11.sp else 13.sp,
+                lineHeight = if (compact) 14.sp else 17.sp,
                 fontWeight = FontWeight.SemiBold,
-                maxLines = 4,
+                maxLines = if (compact) 3 else 4,
                 overflow = TextOverflow.Ellipsis,
             )
             Column {
@@ -107,14 +112,14 @@ fun BookCover(
                     Text(
                         text = subtitle,
                         color = Color.White.copy(alpha = 0.78f),
-                        fontSize = 10.sp,
+                        fontSize = if (compact) 9.sp else 10.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
                 if (progress != null && progress > 0.001f) {
-                    Spacer(Modifier.height(6.dp))
-                    ProgressTrack(progress)
+                    Spacer(Modifier.height(if (compact) 4.dp else 6.dp))
+                    ProgressTrack(progress, height = if (compact) 2.dp else 3.dp)
                 }
             }
         }
@@ -123,7 +128,7 @@ fun BookCover(
             Box(
                 Modifier
                     .align(Alignment.TopEnd)
-                    .padding(6.dp)
+                    .padding(if (compact) 4.dp else 6.dp)
                     .clip(RoundedCornerShape(6.dp))
                     .background(Color.Black.copy(alpha = 0.34f))
                     .padding(horizontal = 5.dp, vertical = 1.dp)
@@ -131,7 +136,7 @@ fun BookCover(
                 Text(
                     text = badge,
                     color = Color.White,
-                    fontSize = 9.sp,
+                    fontSize = if (compact) 8.sp else 9.sp,
                     fontWeight = FontWeight.Medium,
                 )
             }
@@ -140,11 +145,11 @@ fun BookCover(
 }
 
 @Composable
-private fun ProgressTrack(progress: Float) {
+private fun ProgressTrack(progress: Float, height: androidx.compose.ui.unit.Dp = 3.dp) {
     Box(
         Modifier
             .fillMaxWidth()
-            .height(3.dp)
+            .height(height)
             .clip(RoundedCornerShape(2.dp))
             .background(Color.White.copy(alpha = 0.3f))
     ) {
