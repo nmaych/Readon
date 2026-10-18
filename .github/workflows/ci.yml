@@ -50,6 +50,14 @@ jobs:
         with:
           validate-wrappers: true
 
+      - name: Make the Gradle wrapper executable
+        working-directory: app-project
+        # The bit is set in the index now, but a checkout that goes through a
+        # filesystem or an export step that drops modes would still break here,
+        # and "Permission denied" reads like a broken repository rather than a
+        # missing mode. One chmod is cheaper than that diagnosis.
+        run: chmod +x gradlew
+
       # No signing inputs are provided on purpose. The build script treats
       # "all four signing inputs" and "none" as the two valid states, so this
       # exercises the unsigned path and proves a fresh clone still builds.

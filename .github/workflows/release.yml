@@ -85,6 +85,14 @@ jobs:
           # The project's own wrapper is the authority on the Gradle version.
           validate-wrappers: true
 
+      - name: Make the Gradle wrapper executable
+        working-directory: app-project
+        # `git update-index --chmod=+x` fixed this for new commits, but a tag that
+        # already exists keeps whatever mode it was cut with -- and this workflow
+        # checks out *the tag*. Re-applying the bit here is what lets an older tag
+        # release, instead of failing with "./gradlew: Permission denied".
+        run: chmod +x gradlew
+
       - name: Decode release keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.READON_KEYSTORE_BASE64 }}
