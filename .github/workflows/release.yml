@@ -65,7 +65,7 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
         with:
           # `packages` is spelled out rather than left to the action's default.
           # The default is `tools platform-tools`, and Google has since removed the
