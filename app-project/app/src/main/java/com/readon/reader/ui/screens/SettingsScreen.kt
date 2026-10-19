@@ -1050,7 +1050,14 @@ private fun UpdateCard(
             Markdown.summary(state.info.notes, 100).ifBlank { "点击下载并安装。" },
         )
         is UpdateCenter.State.Downloading -> Triple(
-            MaterialTheme.colorScheme.primary, "正在下载更新…", "",
+            MaterialTheme.colorScheme.primary,
+            "正在下载更新…",
+            // A percentage once one exists, and an honest "preparing" before that.
+            // The old body was empty, so the first seconds of the transfer -- which
+            // are spent racing routes for a 10 MB APK -- were a title with nothing
+            // under it, which reads as a tap that did not register.
+            if (state.indeterminate || state.progress <= 0f) "正在连接线路…"
+            else "${(state.progress * 100).toInt()}%",
         )
         is UpdateCenter.State.ReadyToInstall -> Triple(
             MaterialTheme.colorScheme.secondary, "下载完成",
@@ -1102,12 +1109,16 @@ private fun UpdateCard(
             when (state) {
                 is UpdateCenter.State.Downloading -> {
                     Spacer(Modifier.height(10.dp))
-                    if (state.progress >= 0f) {
+                    if (state.progress >= 0f && !state.indeterminate) {
                         LinearProgressIndicator(
                             progress = { state.progress },
                             modifier = Modifier.fillMaxWidth(),
                         )
                     } else {
+                        // Indeterminate rather than a bar pinned at 0%: while the
+                        // route is still being chosen there is no fraction to show,
+                        // and a 0% bar that does not move is indistinguishable from
+                        // a stalled download.
                         LinearProgressIndicator(Modifier.fillMaxWidth())
                     }
                 }

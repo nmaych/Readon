@@ -31,7 +31,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -535,18 +534,21 @@ private fun ReaderBody(
      */
     val hudLineDp = with(density) { HUD_LINE.toDp().value }
 
-    // Read at composition, not inside `remember`: window insets are snapshot state, so
-    // reading them here is what makes the band recompute when the system puts a bar
-    // back (see the resume handling in [ReaderScreen]) instead of keeping the band it
-    // measured on the first frame.
+    // Read at composition, not inside `remember`: insets are snapshot state, so the
+    // band still recomputes if the cutout itself changes (rotation, a foldable).
+    //
+    // **The system status bar is deliberately not part of this figure**, and that is
+    // the fix for 显示/隐藏状态栏时正文位置跳动. It used to be
+    // `max(cutout, statusBars)`, so every time the platform put the bar back -- a
+    // swipe from the top edge, or coming back from another app before the resume
+    // handler hides it again -- the band grew by the bar's height, the body was
+    // re-inset, and in paged mode the whole chapter was re-paginated at the new
+    // height, which moved the reader to a different page of the same text. A
+    // temporary overlay must not reflow the page underneath it. The reader's own
+    // line is drawn where the system bar draws, so the transient bar covers it --
+    // the least disruptive thing an overlay can do.
     val topObstructionDp = with(density) {
-        maxOf(
-            WindowInsets.displayCutout.getTop(this),
-            // Zero while the bar is hidden, and its real height on the frame where the
-            // platform has restored it. `max` means that frame is covered by the band
-            // rather than the prose sliding up under the bar.
-            WindowInsets.statusBars.getTop(this),
-        ).toDp().value
+        WindowInsets.displayCutout.getTop(this).toDp().value
     }
     val band = remember(hudLineDp, topObstructionDp) {
         ReaderHud.band(cutoutTopDp = topObstructionDp, lineDp = hudLineDp)
@@ -616,19 +618,36 @@ private fun ReaderBody(
         // the same number -- measuring a page against one width and drawing it at
         // another clips the last line mid-character.
         val windowWidthDp = with(density) { constraints.maxWidth.toDp().value.toInt() }
-        val textWidthDp = Adapt.readerTextWidthDp(windowWidthDp)
-        val horizontalPadding = with(density) {
-            Adapt.readerHorizontalPaddingDp(windowWidthDp).dp
-        }
+        // Derived from the capped column width, so the margin and the text column
+        // always add up to the window -- see [Adapt.readerHorizontalPaddingDp].
+        val horizontalPadding = Adapt.readerHorizontalPaddingDp(windowWidthDp).dp
 
-        val pageWidthPx = with(density) { textWidthDp.dp.roundToPx() }
-        val pageHeightPx = with(density) {
-            // Both insets are part of the page's padding, so they have to come out
-            // of the measured height as well: paginating against the full height
-            // would produce pages whose last line is drawn under the footer --
-            // measured as fitting, and then clipped.
-            (constraints.maxHeight - (verticalPadding * 2 + topInset + bottomInset).toPx()).toInt()
-        }
+        // The page is measured in the *same pixels* it is drawn in.
+        //
+        // This used to go the other way round: the width came from a whole-dp figure
+        // (`textWidthDp`, truncated from the window) while the drawn column was the
+        // window minus two dp paddings, and the height was a single rounded sum while
+        // the drawn box subtracted each padding separately. Both differences are
+        // sub-pixel, but a page is measured *once* and drawn *every* frame: a column
+        // that is one pixel wider than the one that was measured fits one more
+        // character on some line, the text then needs one more line than the page has,
+        // and the last line is clipped by `clipToBounds` -- 翻页模式最后一两行被截掉.
+        //
+        // So each inset is converted to pixels with exactly the expression the drawing
+        // side uses, and the page is whatever is left:
+        //
+        //  * horizontally, the modifier applies `horizontalPadding` to *each* side, so
+        //    the drawn width is `maxWidth - 2 * round(horizontalPadding)`;
+        //  * vertically, it applies `verticalPadding + topInset` as one `Dp` to the top
+        //    and `verticalPadding + bottomInset` as one `Dp` to the bottom, so each of
+        //    those sums is rounded as a whole rather than term by term. Rounding the
+        //    terms separately would be a pixel off -- the very bug being fixed.
+        val horizontalPaddingPx = with(density) { horizontalPadding.roundToPx() }
+        val topPaddingPx = with(density) { (verticalPadding + topInset).roundToPx() }
+        val bottomPaddingPx = with(density) { (verticalPadding + bottomInset).roundToPx() }
+
+        val pageWidthPx = (constraints.maxWidth - horizontalPaddingPx * 2).coerceAtLeast(1)
+        val pageHeightPx = (constraints.maxHeight - topPaddingPx - bottomPaddingPx).coerceAtLeast(1)
 
         // The paginator is built here rather than inside [PagedReader] because the
         // footer needs it too: "第 12 / 340 页" is the paginator's own count, and
@@ -891,7 +910,8 @@ private fun PagedReader(
     goToChapter: (Int, Boolean) -> Unit,
 ) {
 
-    // Restore the saved position once, on the first layout of each chapter.
+    // Restore the saved position once, on the first layout of each chapter, and keep
+    // the reader on the same sentence whenever the page grid itself changes.
     //
     // Reads `state.restoreOffset`, not `book.charOffset`: the latter is where the
     // book was *opened* and never changes, so consulting it on every chapter
@@ -899,34 +919,83 @@ private fun PagedReader(
     // chapter they had previously been in. The offset is consumed on use, and
     // explicit navigation clears it (see `goToChapter`/`jumpTo`).
     //
-    // Skipped for the "previous chapter, last page" sentinel: restoring over it
-    // would turn "go to the previous chapter" into "go to its first page".
-    var restoredFor by remember(paginator) { mutableStateOf<Int?>(null) }
-    LaunchedEffect(paginator) {
-        val p = paginator ?: return@LaunchedEffect
-        if (restoredFor == state.chapterIndex) return@LaunchedEffect
-        restoredFor = state.chapterIndex
-        if (state.pageInChapter >= SENTINEL_LAST_PAGE) return@LaunchedEffect
-        val saved = state.restoreOffset ?: return@LaunchedEffect
-        state.restoreOffset = null
-        val chapter = content.chapters.getOrNull(state.chapterIndex)
-        val target = when {
-            chapter != null && saved in chapter.start until chapter.end -> saved - chapter.start
-            chapter == null -> saved
-            // The saved offset is in another chapter, so this chapter starts at
-            // its own beginning.
-            else -> 0
-        }
-        if (target > 0) state.pageInChapter = p.pageOf(target)
-    }
+    // The three cases are ordered, and the order is the whole point:
+    //
+    //  1. **A saved position** to restore. Skipped for the "previous chapter, last
+    //     page" sentinel, which would otherwise become "its first page".
+    //  2. **The sentinel**, resolved here because this is where the page count is
+    //     known.
+    //  3. **Repagination.** The paginator is rebuilt whenever the font size, the
+    //     line spacing, the column width or the page height changes -- and the page
+    //     index is *not* a position, it is an index into a grid that has just been
+    //     replaced. Keeping it across a rebuild is what made 改字号 in paged mode
+    //     land on a different sentence (the README promises the opposite: the
+    //     position is a character offset, so a reflow keeps the same sentence), and
+    //     when the new grid had *fewer* pages it also left `pageInChapter` past the
+    //     end: the footer read "第 15 / 12 页" and the reader was stuck on the
+    //     chapter's last page until they turned back. Mapping the current offset
+    //     through the new grid fixes both, and costs one `pageOf`.
+    //
+    // Case 3 deliberately does *not* run while a jump is pending: the jump effect
+    // below is what owns the position in that case, and two effects racing to set
+    // one field is how "跳转后落在上一页" bugs happen.
+    /** Whether the book's saved position has been applied. Once per book. */
+    var restoreDone by remember(book.id) { mutableStateOf(false) }
 
-    // The "previous chapter, last page" sentinel is resolved here, where the
-    // page count is known.
+    /** Which chapter's paginator was last laid out, to tell "new chapter" from "new grid". */
+    var laidOutChapter by remember(book.id) { mutableStateOf<Int?>(null) }
+
+    // The offset the reader was at *before* this paginator existed.
+    //
+    // Captured during composition, which is the only moment guaranteed to be before
+    // any effect runs. Reading `state.currentOffset` inside the effect instead would
+    // race the progress writer below: on a font-size change both effects restart, and
+    // if the writer ran first it would already have replaced the position with the
+    // page at the *old index in the new grid* -- the wrong answer this mapping exists
+    // to avoid.
+    val offsetBeforeRebuild = remember(paginator) { state.currentOffset }
+
     LaunchedEffect(paginator) {
         val p = paginator ?: return@LaunchedEffect
+        val chapter = content.chapters.getOrNull(state.chapterIndex)
+        fun relativeOf(absolute: Int): Int? = when {
+            chapter != null && absolute in chapter.start until chapter.end -> absolute - chapter.start
+            chapter == null -> absolute
+            else -> null
+        }
+
+        if (!restoreDone) {
+            restoreDone = true
+            val saved = state.restoreOffset
+            state.restoreOffset = null
+            // Skipped for the "previous chapter, last page" sentinel, which would
+            // otherwise become "its first page".
+            if (saved != null && state.pendingJumpOffset == null &&
+                state.pageInChapter < SENTINEL_LAST_PAGE
+            ) {
+                state.pageInChapter = p.pageOf(relativeOf(saved) ?: 0)
+                laidOutChapter = state.chapterIndex
+                return@LaunchedEffect
+            }
+        }
+
+        val sameChapter = laidOutChapter == state.chapterIndex
+        laidOutChapter = state.chapterIndex
+
         if (state.pageInChapter >= SENTINEL_LAST_PAGE) {
             p.completeAll()
             state.pageInChapter = (p.pageCount - 1).coerceAtLeast(0)
+            return@LaunchedEffect
+        }
+
+        // The jump effect below owns the position while one is pending; two effects
+        // racing to set one field is how "跳转后落在上一页" bugs happen.
+        if (state.pendingJumpOffset != null) return@LaunchedEffect
+
+        // Same chapter, new grid: keep the reader on the same sentence.
+        if (sameChapter) {
+            val relative = relativeOf(offsetBeforeRebuild) ?: return@LaunchedEffect
+            state.pageInChapter = p.pageOf(relative)
         }
     }
 
@@ -946,7 +1015,11 @@ private fun PagedReader(
     LaunchedEffect(paginator, state.pageInChapter, state.chapterIndex) {
         val p = paginator ?: return@LaunchedEffect
         val chapter = content.chapters.getOrNull(state.chapterIndex)
-        val page = p.page(state.pageInChapter)
+        // Clamped like the drawn page and the footer: `p.page(index)` answers with the
+        // last page it has for an index past the end, so a stale index would otherwise
+        // persist the *last* page of the chapter as the reading position -- moving the
+        // reader to the end of the chapter on the next open.
+        val page = p.page(state.pageInChapter.coerceIn(0, (p.pageCount - 1).coerceAtLeast(0)))
         val absolute = if (chapter != null) chapter.start + page.start else page.start
         state.currentOffset = absolute
         app.store.updateProgress(
@@ -1027,10 +1100,16 @@ private fun PagedReader(
 
     // --- the page ------------------------------------------------------
     //
-    // Clipped, for the same reason the scrolling mode's window is: a page is measured
-    // to fit between the two status bands, and `clipToBounds` is what makes "measured
-    // to fit" also mean "cannot draw past the edge" when a measurement and a render
-    // disagree by a pixel. Without it the last line could still touch the footer.
+    // The padding is the *same* [Dp] values the page was measured with, applied to
+    // the same window, so the drawn rectangle is exactly the measured one. See the
+    // pixel arithmetic in [ReaderBody]: an off-by-one-pixel column fits one extra
+    // character, the paragraph needs one more line than the page has, and the last
+    // line is then clipped -- which is what 翻页模式下正文显示不全 looked like.
+    //
+    // Clipped as well, for the same reason the scrolling mode's window is: `padding`
+    // only bounds where the child is *placed*, and a `Text` that lays out taller than
+    // its slot would still draw past it. `clipToBounds` makes "measured to fit" also
+    // mean "cannot draw past the edge".
     Box(
         Modifier
             .fillMaxSize()
@@ -1061,8 +1140,15 @@ private fun PagedReader(
             },
     ) {
         if (paginator != null) {
+            // The page index is clamped to the pages that exist *now*. It can be
+            // stale for a frame after the paginator is rebuilt -- the effect that
+            // maps the old offset through the new grid runs after the first
+            // composition -- and `Paginator.textOf` would otherwise answer with the
+            // last page it happens to have, which is a different page of the chapter
+            // than the one the footer is counting.
+            val index = state.pageInChapter.coerceIn(0, (paginator.pageCount - 1).coerceAtLeast(0))
             Text(
-                text = paginator.textOf(state.pageInChapter),
+                text = paginator.textOf(index),
                 style = textStyle,
                 modifier = Modifier.fillMaxSize(),
             )
@@ -1422,10 +1508,12 @@ private val HUD_LINE = 18.sp
  * gesture area where a swipe competes with them. The cutout is padded for
  * separately; this is the margin on a device that has neither a bar nor a notch.
  *
- * The same figure as [ReaderHud.EDGE_DP], so the status lines and the bars sit on one
- * vertical line instead of two that are 2 dp apart.
+ * Two figures, matching the two status lines: [ReaderHud.TOP_EDGE_DP] at the top so
+ * the toolbar's chapter name sits on the same baseline as the status line it
+ * replaces, [ReaderHud.EDGE_DP] at the bottom for the gesture area.
  */
-private val CHROME_EDGE_MIN = ReaderHud.EDGE_DP.dp
+private val CHROME_TOP_EDGE_MIN = ReaderHud.TOP_EDGE_DP.dp
+private val CHROME_BOTTOM_EDGE_MIN = ReaderHud.EDGE_DP.dp
 
 /**
  * Extra clearance the reader's top bar needs above the status band.
@@ -1464,7 +1552,7 @@ private val CONTENT_FADE_EDGE = 16.dp
  */
 @Composable
 private fun Modifier.readerTopChrome(): Modifier =
-    this.displayCutoutPadding().padding(top = CHROME_EDGE_MIN)
+    this.displayCutoutPadding().padding(top = CHROME_TOP_EDGE_MIN)
 
 /**
  * Clearance for the reader's own chrome at the bottom of the screen.
@@ -1472,7 +1560,7 @@ private fun Modifier.readerTopChrome(): Modifier =
  * Same reasoning as [readerTopChrome], for the hidden navigation bar.
  */
 private fun Modifier.readerBottomChrome(): Modifier =
-    this.padding(bottom = CHROME_EDGE_MIN)
+    this.padding(bottom = CHROME_BOTTOM_EDGE_MIN)
 
 /**
  * The line where the phone's status bar used to be: which chapter is being read.
@@ -1525,13 +1613,18 @@ private fun ReaderStatusHeader(
         // The cutout, the edge margin, one line and the gap below it: exactly
         // `Band.topDp`, which is also what the body is inset by. The bottom of this
         // composable is therefore the top of the first line of prose.
+        //
+        // `topEdgeDp`, not `edgeDp`: the chapter line is the *top* status line, and
+        // it sits where the phone's own status bar sits -- a few dp from the edge.
+        // At the footer's 10 dp it read as a stray line of content rather than as
+        // chrome (阅读界面上方状态栏上移一些).
         Column(
             Modifier
                 .fillMaxWidth()
                 // `displayCutoutPadding`, not `statusBarsPadding`: the status bar is
                 // hidden (so its inset is zero) but a notch is hardware and stays.
                 .displayCutoutPadding()
-                .padding(top = band.edgeDp.dp, bottom = band.gapDp.dp)
+                .padding(top = band.topEdgeDp.dp, bottom = band.gapDp.dp)
                 .padding(horizontal = ReaderHud.EDGE_DP.dp),
         ) {
             Text(
@@ -1591,7 +1684,7 @@ private fun ReaderStatusFooter(
                 .fillMaxWidth()
                 .padding(
                     top = band.gapDp.dp,
-                    bottom = band.edgeDp.dp,
+                    bottom = band.bottomEdgeDp.dp,
                 )
                 .padding(horizontal = ReaderHud.EDGE_DP.dp),
         ) {
@@ -1826,9 +1919,19 @@ private fun ReaderBottomBar(
                         // percentage alone; paged mode still shows the page, with
                         // a "+" marking a count that is still growing so the user
                         // is not misled into thinking it is the last page.
-                        mode == ReadingMode.Paged && paginator != null ->
-                            "第 ${state.pageInChapter + 1} / ${paginator.pageCount}" +
+                        //
+                        // The page is clamped for the same reason the drawn page is:
+                        // after a repagination the stored index belongs to the grid
+                        // that was just replaced, so for the one frame before the
+                        // mapping effect runs it can be past the end -- and the footer
+                        // would read "第 15 / 12 页", which is not a state the reader
+                        // can act on.
+                        mode == ReadingMode.Paged && paginator != null -> {
+                            val shown = state.pageInChapter
+                                .coerceIn(0, (paginator.pageCount - 1).coerceAtLeast(0))
+                            "第 ${shown + 1} / ${paginator.pageCount}" +
                                 if (!paginator.isComplete) "+" else ""
+                        }
                         else -> "${(fraction * 100).toInt()}%"
                     },
                     color = skin.secondaryText,

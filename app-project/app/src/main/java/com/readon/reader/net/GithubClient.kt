@@ -93,6 +93,15 @@ data class RangeResult(
 class GithubClient(private val prefs: Prefs) {
 
     /**
+     * Which hosts have just failed, so the next request does not wait on them again.
+     *
+     * Per client rather than per process: the client is the process's single instance
+     * (see `ReadonApp.github`), so this is effectively process-wide, but keeping it
+     * here means the state cannot be shared with a second client in a test.
+     */
+    private val health = RouteHealth()
+
+    /**
      * @param rangeHeader a `Range` value, e.g. `bytes=0-2047`. Used both by the
      *   route probe (a 2 KB window) and by the incremental reader, which fetches
      *   a book in chunks rather than waiting for the whole file.
@@ -135,7 +144,12 @@ class GithubClient(private val prefs: Prefs) {
      */
     private fun mirrorOrder(): List<Mirror> {
         Mirror.byId(prefs.pinnedMirror)?.let { return listOf(it) }
-        return ordered(Mirror.byId(prefs.preferredMirror), Mirror.RACE_ORDER)
+        // Routes that have just failed go to the back rather than out of the list: a
+        // network that is briefly down would otherwise leave nothing to try. See
+        // [RouteHealth] for why that distinction matters.
+        return health.order(ordered(Mirror.byId(prefs.preferredMirror), Mirror.RACE_ORDER)) {
+            it.id
+        }
     }
 
     /**
@@ -157,16 +171,27 @@ class GithubClient(private val prefs: Prefs) {
         val candidates = mirrorOrder()
         val remembered = Mirror.byId(prefs.preferredMirror)
 
-        if (remembered != null && remembered in candidates) {
+        // The fast path is skipped while the remembered host is cooling down. Probing
+        // it anyway was the hole in this optimisation: a host that had just failed
+        // twice was still the *first* thing every request waited on, so a book
+        // arriving in twenty chunks paid its timeout twenty times. Cooling routes go
+        // straight to the back of the race instead.
+        if (remembered != null && remembered in candidates && !health.isCoolingDown(remembered.id)) {
             val ok = runCatching {
                 probeRange(remembered.rawUrl(source, path, prefs.mirrorPrefix), FAST_PROBE_MS)
             }.getOrDefault(false)
-            if (ok) return@withContext remembered
+            if (ok) {
+                health.recordSuccess(remembered.id)
+                return@withContext remembered
+            }
+            health.recordFailure(remembered.id)
             onStage("首选线路无响应，正在切换…")
         }
 
-        // The remembered host has just failed its short probe, so racing it again
-        // would only add a request that cannot win. Everything else is tried.
+        // The remembered host is left out of the race: either its short probe has just
+        // failed (so racing it again would only add a request that cannot win), or it
+        // is cooling down (so it is already at the back of `candidates` and should not
+        // be woken up ahead of that). Everything else is tried.
         val racers = if (remembered != null) candidates.filter { it != remembered } else candidates
         if (racers.isEmpty()) return@withContext remembered
 
@@ -188,11 +213,16 @@ class GithubClient(private val prefs: Prefs) {
                     winner = mirror
                     break
                 }
+                // Only failures that actually *arrived* are recorded. A probe that was
+                // cancelled because another host won is not evidence against it, and
+                // recording it would demote the fastest loser on every race.
+                health.recordFailure(mirror.id)
             }
             // Cancelling here now genuinely aborts the in-flight probes: each is
             // an enqueued OkHttp call whose cancellation closes its socket.
             jobs.forEach { it.cancel() }
             results.close()
+            winner?.let { health.recordSuccess(it.id) }
             // Falling back to the remembered host is better than returning null:
             // its fast probe may have lost a race with a momentarily busy network,
             // and the real transfer retries the whole list anyway.
@@ -244,9 +274,11 @@ class GithubClient(private val prefs: Prefs) {
             try {
                 val value = block(mirror)
                 prefs.preferredMirror = mirror.id
+                health.recordSuccess(mirror.id)
                 return@withContext value
             } catch (e: Throwable) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
+                health.recordFailure(mirror.id)
                 lastError = e
             }
         }
@@ -265,24 +297,58 @@ class GithubClient(private val prefs: Prefs) {
      *
      * [LibraryListing.truncated] is not an error: GitHub caps very large trees and
      * a partial library is still usable, so the flag only drives a warning.
+     *
+     * ## Why the remembered source is tried alone first
+     *
+     * Racing all five sources is the right answer when nothing is known -- it is how
+     * the first listing on a blocked network finds a route that works. It is the
+     * wrong answer for every listing after that: five ~13 KB requests per refresh,
+     * five sockets, and the answer is going to come from the same source as last
+     * time. The remembered source therefore gets one short attempt of its own, and
+     * only a failure falls through to the race. On a working network that turns a
+     * refresh from five requests into one (网络连接优化).
      */
     suspend fun listBooks(source: LibrarySource): LibraryListing = withContext(Dispatchers.IO) {
-        val (listing, via) = race(listOrder(), { it.label }) { src -> fetchListing(src, source) }
+        val remembered = ListSource.byId(prefs.preferredListSource)
+        if (prefs.pinnedListSource.isBlank() && remembered != null &&
+            !health.isCoolingDown(remembered.id)
+        ) {
+            val quick = runCatching { fetchListing(remembered, source) }.getOrNull()
+            if (quick != null) {
+                health.recordSuccess(remembered.id)
+                return@withContext quick
+            }
+            health.recordFailure(remembered.id)
+        }
+
+        val (listing, via) = race(
+            listOrder(),
+            { it.label },
+            { it.id },
+        ) { src -> fetchListing(src, source) }
         prefs.preferredListSource = via.id
         listing
     }
 
     private fun listOrder(): List<ListSource> {
         ListSource.byId(prefs.pinnedListSource)?.let { return listOf(it) }
-        return ordered(ListSource.byId(prefs.preferredListSource), ListSource.RACE_ORDER)
+        return health.order(
+            ordered(ListSource.byId(prefs.preferredListSource), ListSource.RACE_ORDER),
+        ) { it.id }
     }
 
     private suspend fun fetchListing(src: ListSource, source: LibrarySource): LibraryListing {
         val body = get(src.url(source), LIST_TIMEOUT_MS)
-        return when (src) {
+        val parsed = when (src) {
             ListSource.JsDelivrData -> parseJsDelivr(body, source)
             else -> parseGithubTree(body, source)
         }
+        // `via` names the route that actually answered, which is the one thing that
+        // makes a blocked network diagnosable from the app. The parsers used to stamp
+        // every GitHub-API variant with "GitHub API", so a listing served by
+        // gh-proxy.com was reported as a direct connection -- the exact opposite of
+        // what the user needed to know when the direct route is the blocked one.
+        return parsed.copy(via = src.label)
     }
 
     private fun parseGithubTree(body: String, source: LibrarySource): LibraryListing {
@@ -390,6 +456,66 @@ class GithubClient(private val prefs: Prefs) {
                 onProgress,
             )
         }
+    }
+
+    /**
+     * Download an arbitrary GitHub-hosted file to [target], trying the mirrors.
+     *
+     * Used for the update APK, which lives on `github.com/.../releases/download/...`
+     * rather than on `raw.githubusercontent.com` -- so it never went through any of
+     * the mirror logic, and on a network where GitHub is unreachable the update
+     * download was the one transfer in the app that could not work at all. It is
+     * also ~11 MB, so it is the one place where a *sequential* fallback is right:
+     * racing whole files would multiply the bandwidth by the number of hosts.
+     *
+     * The candidate list is the URL itself followed by the same proxies the raw
+     * routes use, since they forward `github.com` release URLs too. Ordering puts
+     * routes that have just failed at the back (see [RouteHealth]).
+     */
+    suspend fun downloadUrlTo(
+        url: String,
+        target: File,
+        onProgress: (Float) -> Unit = {},
+    ): Long = withContext(Dispatchers.IO) {
+        val candidates = health.order(mirroredUrls(url), ::hostOf)
+        var lastError: Throwable? = null
+        for (candidate in candidates) {
+            try {
+                val written = streamToFile(candidate, target, expectedSize = 0L, onProgress = onProgress)
+                health.recordSuccess(hostOf(candidate))
+                return@withContext written
+            } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                health.recordFailure(hostOf(candidate))
+                lastError = e
+            }
+        }
+        throw LibraryException(
+            lastError?.message ?: "下载失败，请检查网络后重试",
+            lastError,
+        )
+    }
+
+    /**
+     * [url] plus the proxies that can forward it.
+     *
+     * Only GitHub URLs are proxied: a user-configured manifest URL may point
+     * anywhere, and rewriting an arbitrary host into a GitHub proxy would turn a
+     * working download into a 404.
+     */
+    private fun mirroredUrls(url: String): List<String> {
+        if (!url.startsWith("https://github.com/") &&
+            !url.startsWith("https://raw.githubusercontent.com/") &&
+            !url.startsWith("https://api.github.com/")
+        ) {
+            return listOf(url)
+        }
+        return listOf(
+            url,
+            "https://ghproxy.net/$url",
+            "https://gh-proxy.com/$url",
+            "https://ghfast.top/$url",
+        )
     }
 
     private suspend fun streamToFile(
@@ -627,16 +753,29 @@ class GithubClient(private val prefs: Prefs) {
     ): String =
         withContext(Dispatchers.IO) {
             val target = if (noCache) bustCache(url) else url
+            // Both GitHub hosts are worth mirroring, and the update check depends on
+            // it: the manifest lives on `raw.githubusercontent.com` and the release
+            // list on `api.github.com`, and on a network that blocks one it often
+            // blocks the other. Only `raw` used to get the proxies, so the release
+            // lookup was a single unmirrored request that could time out on its own
+            // and hold the whole check for its full timeout.
             val candidates = buildList {
                 add(target)
-                if (target.startsWith("https://raw.githubusercontent.com/")) {
+                val proxied = when {
+                    target.startsWith("https://raw.githubusercontent.com/") -> true
+                    target.startsWith("https://api.github.com/") -> true
+                    else -> false
+                }
+                if (proxied) {
                     add("https://ghproxy.net/$target")
                     add("https://gh-proxy.com/$target")
                     add("https://ghfast.top/$target")
                 }
             }
-            val (body, _) = race(candidates, ::hostOf) { get(it, timeoutMs, noCache) }
-            body
+            // Healthy hosts first: a host that has just failed twice in a row is
+            // moved to the back rather than dropped, so a network that is briefly
+            // down still leaves something to try (see [RouteHealth]).
+            raceUrls(health.order(candidates, ::hostOf)) { get(it, timeoutMs, noCache) }
         }
 
     /**
@@ -664,12 +803,18 @@ class GithubClient(private val prefs: Prefs) {
      */
     suspend fun probeRoutes(source: LibrarySource, path: String): List<Pair<String, Boolean>> =
         withContext(Dispatchers.IO) {
+            // An explicit diagnostic is the user saying "check them all again", so the
+            // cooldown history is dropped first -- otherwise the routes most likely to
+            // be the problem are the ones reported in the old order, and a route that
+            // has just recovered would still be listed as untested.
+            health.forgetAll()
             val results = Channel<Pair<String, Boolean>>(Channel.UNLIMITED)
             coroutineScope {
                 Mirror.RACE_ORDER.forEach { mirror ->
                     launch {
                         val url = mirror.rawUrl(source, path, prefs.mirrorPrefix)
                         val ok = runCatching { probeRange(url) }.getOrDefault(false)
+                        if (ok) health.recordSuccess(mirror.id) else health.recordFailure(mirror.id)
                         results.send(mirror.label to ok)
                     }
                 }
@@ -692,10 +837,19 @@ class GithubClient(private val prefs: Prefs) {
      * racing all of them costs less than a single page of a book. File transfers
      * go through [pickMirror] and [withMirrors] instead, because racing whole
      * files would multiply bandwidth by the number of hosts.
+     *
+     * ## Why failures are recorded here
+     *
+     * This is the one place that *sees* every candidate's outcome, so it is where
+     * [RouteHealth] learns which hosts are dead. Cancelled losers are not recorded --
+     * `runCatching` cannot tell a cancellation from a timeout, and the coroutine
+     * builder already surfaces cancellation by throwing out of `receive` -- because a
+     * host that lost a race to a faster one has not failed at anything.
      */
     private suspend fun <T, C> race(
         candidates: List<C>,
         describe: (C) -> String,
+        key: (C) -> String,
         block: suspend (C) -> T,
     ): Pair<T, C> = coroutineScope {
         if (candidates.isEmpty()) throw LibraryException("没有可用的访问线路")
@@ -713,9 +867,11 @@ class GithubClient(private val prefs: Prefs) {
             val value = outcome.getOrNull()
             if (value != null) {
                 winner = value to candidate
+                health.recordSuccess(key(candidate))
                 break
             }
             failures.add("${describe(candidate)}：${outcome.exceptionOrNull()?.message ?: "失败"}")
+            health.recordFailure(key(candidate))
         }
 
         jobs.forEach { it.cancel() }
@@ -726,6 +882,17 @@ class GithubClient(private val prefs: Prefs) {
                 ?: "网络不可用，请检查连接或在「设置」里换一条线路",
         )
     }
+
+    /**
+     * [race] over URLs, keyed by host.
+     *
+     * The key is the host rather than the whole URL because the cooldown is a fact
+     * about the *host*: a proxy that is blocked is blocked for every path on it.
+     */
+    private suspend fun raceUrls(
+        candidates: List<String>,
+        block: suspend (String) -> String,
+    ): String = race(candidates, ::hostOf, ::hostOf, block).first
 
     private fun <T> ordered(preferred: T?, all: List<T>): List<T> {
         if (preferred == null) return all
@@ -740,6 +907,16 @@ class GithubClient(private val prefs: Prefs) {
                     JsonParser.parseString(body).asJsonObject.get("message")?.asString
                 }.getOrNull()
                 throw LibraryException(explain(msg ?: httpMessage(resp.code)))
+            }
+            // Several of the proxies answer an unknown path with an HTML page under a
+            // 200 -- and now that the update check races the proxies for
+            // `api.github.com` too, such a page would win the race and then fail to
+            // parse, hiding a perfectly good answer from another route. Every caller
+            // of this method wants JSON, so an HTML body is a route failure, not a
+            // result.
+            val head = body.trimStart().take(64).lowercase()
+            if (head.startsWith("<")) {
+                throw LibraryException("这条线路返回的是网页而不是数据，已跳过")
             }
             return body
         }

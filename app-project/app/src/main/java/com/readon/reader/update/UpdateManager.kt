@@ -9,12 +9,10 @@ import com.google.gson.JsonParser
 import com.readon.reader.BuildConfig
 import com.readon.reader.data.Prefs
 import com.readon.reader.net.GithubClient
-import com.readon.reader.net.Http
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
-import okhttp3.Request
 import java.io.File
 import java.security.MessageDigest
 
@@ -219,31 +217,13 @@ class UpdateManager(
         dir.listFiles()?.forEach { runCatching { it.delete() } }
         val target = File(dir, "readon-${update.versionName}.apk")
 
-        val req = Request.Builder()
-            .url(update.apkUrl)
-            .header("User-Agent", Http.USER_AGENT)
-            .build()
-
-        // A whole-call ceiling: an APK is ~10 MB, so if it has not arrived in ten
-        // minutes the route is not going to deliver it.
-        Http.execute(req, DOWNLOAD_TIMEOUT_MS).use { resp ->
-            if (!resp.isSuccessful) error("下载失败：HTTP ${resp.code}")
-            val body = resp.body ?: error("下载失败：内容为空")
-            val total = body.contentLength()
-            body.byteStream().use { input ->
-                target.outputStream().use { out ->
-                    val buf = ByteArray(64 * 1024)
-                    var read = 0L
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        out.write(buf, 0, n)
-                        read += n
-                        onProgress(if (total > 0) read.toFloat() / total else -1f)
-                    }
-                }
-            }
-        }
+        // Through the client, not a bare request: the APK lives on `github.com`,
+        // which is as unreachable as `raw.githubusercontent.com` on the networks
+        // this app is built for, and this used to be the only transfer in the app
+        // that ignored the mirror list entirely. A whole-call ceiling still
+        // applies (an APK is ~10 MB, so ten minutes means the route is not going
+        // to deliver it).
+        client.downloadUrlTo(update.apkUrl, target, onProgress)
 
         // Verify the manifest's digest when it published one. A truncated or
         // substituted APK would otherwise be handed straight to the installer.
@@ -345,10 +325,13 @@ class UpdateManager(
          * routes each getting a full connect timeout is what made the card look
          * stuck; fifteen seconds is long enough for a slow-but-working route and
          * short enough that a dead one reports a failure the user can act on.
+         *
+         * Lowered from 15 s for 点击更新后一段时间无反应: the two sources are asked
+         * concurrently, so this is also how long the card can sit on "正在检查…"
+         * with nothing else to show. Ten seconds still covers a slow-but-working
+         * route -- a few kilobytes of JSON -- while halving the worst case on a
+         * network where the first host is a black hole.
          */
-        private const val CHECK_TIMEOUT_MS = 15_000L
-
-        /** A whole APK transfer. Generous, but bounded. */
-        private const val DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000L
+        private const val CHECK_TIMEOUT_MS = 10_000L
     }
 }

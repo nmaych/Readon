@@ -49,7 +49,7 @@ class UpdateCenter(
          */
         data class NewerNotInstallable(val message: String) : State
 
-        data class Downloading(val progress: Float) : State
+        data class Downloading(val progress: Float, val indeterminate: Boolean = false) : State
         data class ReadyToInstall(val info: UpdateResult.Available, val file: File) : State
     }
 
@@ -88,7 +88,24 @@ class UpdateCenter(
             // One check at a time, so a button tap during the automatic check
             // cannot run two of them.
             lock.withLock {
-                val result = manager.check()
+                // The result is computed inside a `try`, and that is not defensive
+                // padding: the card is driven entirely by this field, so a throw that
+                // escaped here would leave the state on `Checking` **forever** -- the
+                // button disabled, "正在检查… / 连接 GitHub 中" on screen, and no way
+                // back except restarting the app. That is what 点击更新后一段时间
+                // 无反应 looks like when it never ends. The manager turns transport
+                // failures into `Failed` itself; this catches the rest (an unexpected
+                // parse error, a settings read that throws).
+                val result = try {
+                    manager.check()
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // Leaving the tab must not leave a spinner behind: the state is
+                    // process-wide, so it has to be put back before rethrowing.
+                    state = State.Idle
+                    throw e
+                } catch (e: Throwable) {
+                    UpdateResult.Failed(e.message ?: "检查更新失败")
+                }
                 state = when (result) {
                     is UpdateResult.Available ->
                         if (result.versionCode == prefs.ignoredVersionCode) State.Idle
@@ -109,11 +126,25 @@ class UpdateCenter(
         }
     }
 
-    /** Download [info] and hand it to the installer. */
+    /**
+     * Download [info] and hand it to the installer.
+     *
+     * The state is moved to [State.Downloading] **before** the transfer starts, and
+     * that is the fix for the other half of 点击更新后一段时间无反应: the card used to
+     * stay on "发现新版本" with the notes box and a live-looking 下载更新 button until
+     * the first bytes arrived. On these networks the route probe alone can take
+     * several seconds, so the tap looked like it had done nothing -- and the natural
+     * response is to tap again. The guard below makes a second tap a no-op rather
+     * than a second transfer.
+     */
     fun download(info: UpdateResult.Available, onReady: (File) -> Unit) {
+        if (state is State.Downloading) return
+        state = State.Downloading(0f, indeterminate = true)
         scope.launch {
             try {
-                val file = manager.download(info) { p -> state = State.Downloading(p) }
+                val file = manager.download(info) { p ->
+                    state = State.Downloading(p, indeterminate = p < 0f)
+                }
                 state = State.ReadyToInstall(info, file)
                 onReady(file)
             } catch (e: kotlinx.coroutines.CancellationException) {

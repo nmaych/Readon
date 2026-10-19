@@ -105,8 +105,20 @@ object ReaderHud {
     //  The bands the two status lines occupy
     // -----------------------------------------------------------------------
 
-    /** The margin the status lines keep from the screen edge, on a device with no notch. */
+    /** The margin the footer line keeps from the bottom edge, on a device with no notch. */
     const val EDGE_DP = 10f
+
+    /**
+     * The margin the top line keeps from the top edge.
+     *
+     * Smaller than [EDGE_DP] on purpose: the top line stands in for the phone's own
+     * status bar, and the system draws that bar tight against the top of the screen.
+     * At 10 dp the chapter name read as *content* that happened to be at the top
+     * rather than as chrome -- reported as 阅读界面上方状态栏上移一些. The bottom line
+     * keeps the larger margin because it sits next to the gesture area, where a
+     * button-flush edge is actively uncomfortable.
+     */
+    const val TOP_EDGE_DP = 4f
 
     /** The gap between a status line and the body text. */
     const val GAP_DP = 8f
@@ -135,37 +147,52 @@ object ReaderHud {
      * clearance, which cost another 18 dp of overlap even at 1.0x.
      *
      * So both numbers are derived here from one line height, and the screen is only
-     * allowed to *use* them: the header is padded by [Band.edgeDp] + the line +
-     * [Band.gapDp], the footer by [Band.edgeDp], and the body is inset by
+     * allowed to *use* them: the header is padded by [Band.topEdgeDp] + the line +
+     * [Band.gapDp], the footer by [Band.bottomEdgeDp], and the body is inset by
      * [Band.topDp] / [Band.bottomDp]. Nothing draws outside the band it reserved.
      *
-     * @param cutoutTopDp the hardware cutout, or the status bar when it is visible.
-     *   A notch is not hidden by hiding the status bar, so it is always taken; using
-     *   `max` of the two means the band also grows on the one frame where the system
-     *   puts the bar back (see the resume handling in the reader).
+     * ## What the band must *not* depend on
+     *
+     * Only the hardware cutout. It used to take `max(cutout, status bar)`, so the
+     * moment the platform put the status bar back -- a swipe from the top edge, or
+     * coming back from another app before the resume handler hides it again -- the
+     * band grew and the body text moved down and repaginated. That is the reported
+     * 显示隐藏状态栏时正文位置跳动: a temporary overlay must not reflow the page
+     * underneath it. The status bar is hidden for the whole visit, so its inset is
+     * zero except during those transient appearances, and the reader's own line is
+     * exactly where the system bar draws -- the transient bar covers it, which is
+     * the least disruptive thing it can do.
+     *
+     * @param cutoutTopDp the hardware cutout. A notch is not hidden by hiding the
+     *   status bar, so it is always taken; the status bar deliberately is not.
      * @param lineDp one line of status text, in dp, **after** the font scale -- i.e.
      *   `with(density) { 18.sp.toDp() }`, not the literal `18`.
+     * @param topEdgeDp the margin above the top line; smaller than [EDGE_DP] so the
+     *   chapter line sits where a status bar sits rather than a little below it.
      */
     fun band(
         cutoutTopDp: Float,
         lineDp: Float,
         gapDp: Float = GAP_DP,
-        edgeDp: Float = EDGE_DP,
+        topEdgeDp: Float = TOP_EDGE_DP,
+        bottomEdgeDp: Float = EDGE_DP,
     ): Band {
         val line = lineDp.coerceAtLeast(MIN_LINE_DP)
         val gap = gapDp.coerceAtLeast(0f)
-        val edge = edgeDp.coerceAtLeast(0f)
+        val topEdge = topEdgeDp.coerceAtLeast(0f)
+        val bottomEdge = bottomEdgeDp.coerceAtLeast(0f)
         val cutout = cutoutTopDp.coerceAtLeast(0f)
         return Band(
             lineDp = line,
             gapDp = gap,
-            edgeDp = edge,
+            topEdgeDp = topEdge,
+            bottomEdgeDp = bottomEdge,
             // Top: the cutout, the line's top margin, the line itself, the gap below it.
-            topDp = cutout + edge + line + gap,
+            topDp = cutout + topEdge + line + gap,
             // Bottom: the line's bottom margin, the line, and the gap above it. The
-            // footer is drawn at `edgeDp` from the bottom edge and the line is part of
-            // the band, so a body inset of this figure clears the text it draws.
-            bottomDp = edge + line + gap,
+            // footer is drawn at `bottomEdgeDp` from the bottom edge and the line is
+            // part of the band, so a body inset of this figure clears what it draws.
+            bottomDp = bottomEdge + line + gap,
         )
     }
 
@@ -174,11 +201,14 @@ object ReaderHud {
      *
      * @property lineDp the line height the band was computed from, so the text drawn
      *   inside it uses the same measurement the reservation did.
+     * @property topEdgeDp the margin above the top line (the chapter name).
+     * @property bottomEdgeDp the margin below the footer line (the clock/battery).
      */
     data class Band(
         val lineDp: Float,
         val gapDp: Float,
-        val edgeDp: Float,
+        val topEdgeDp: Float,
+        val bottomEdgeDp: Float,
         val topDp: Float,
         val bottomDp: Float,
     )

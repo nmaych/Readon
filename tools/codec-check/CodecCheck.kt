@@ -3,6 +3,7 @@ package com.readon.reader.data
 import com.google.gson.JsonParser
 import com.readon.reader.data.Markdown
 import com.readon.reader.data.PartialRead
+import com.readon.reader.net.RouteHealth
 import com.readon.reader.reader.AutoRead
 import com.readon.reader.reader.PageCursor
 import com.readon.reader.reader.ReaderHud
@@ -1977,8 +1978,35 @@ fun main() {
     val band13x = ReaderHud.band(cutoutTopDp = 0f, lineDp = 18f * 1.3f)
     val band20x = ReaderHud.band(cutoutTopDp = 0f, lineDp = 18f * 2.0f)
 
-    check("顶部预留是 边缘+行高+间隙", band1x.topDp == 10f + 18f + 8f, "${band1x.topDp}")
-    check("底部预留是 行高+间隙+边缘", band1x.bottomDp == 18f + 8f + 10f, "${band1x.bottomDp}")
+    check(
+        "顶部预留是 上边距+行高+间隙",
+        band1x.topDp == ReaderHud.TOP_EDGE_DP + 18f + 8f,
+        "${band1x.topDp}",
+    )
+    check(
+        "底部预留是 下边距+行高+间隙",
+        band1x.bottomDp == ReaderHud.EDGE_DP + 18f + 8f,
+        "${band1x.bottomDp}",
+    )
+    // 阅读界面上方状态栏上移一些: the top line has to sit *above* where the footer's
+    // margin would put it, and its band has to be the smaller of the two. Asserted
+    // rather than left to the constants, because "moved up a bit" is exactly the kind
+    // of change that gets reverted by a later refactor without anyone noticing.
+    check(
+        "顶部边距小于底部边距（状态栏上移）",
+        ReaderHud.TOP_EDGE_DP < ReaderHud.EDGE_DP,
+        "top ${ReaderHud.TOP_EDGE_DP} vs bottom ${ReaderHud.EDGE_DP}",
+    )
+    check(
+        "顶部状态行比底部更靠近屏幕边缘",
+        band1x.topDp < band1x.bottomDp,
+        "top ${band1x.topDp} vs bottom ${band1x.bottomDp}",
+    )
+    check(
+        "顶部边距仍然大于 0（不贴边）",
+        ReaderHud.TOP_EDGE_DP > 0f,
+        "${ReaderHud.TOP_EDGE_DP}",
+    )
     // The regression: the band must grow with the font scale, because the text does.
     check(
         "字体放大后预留随之变大",
@@ -2013,8 +2041,23 @@ fun main() {
     check("行高为 0 时仍保留最小行高", ReaderHud.band(0f, 0f).lineDp == ReaderHud.MIN_LINE_DP)
     check("行高为负时仍保留最小行高", ReaderHud.band(0f, -40f).lineDp == ReaderHud.MIN_LINE_DP)
     check("间隙为负时按 0 处理", ReaderHud.band(0f, 18f, gapDp = -5f).gapDp == 0f)
-    check("边缘为负时按 0 处理", ReaderHud.band(0f, 18f, edgeDp = -5f).edgeDp == 0f)
+    check("顶部边缘为负时按 0 处理", ReaderHud.band(0f, 18f, topEdgeDp = -5f).topEdgeDp == 0f)
+    check("底部边缘为负时按 0 处理", ReaderHud.band(0f, 18f, bottomEdgeDp = -5f).bottomEdgeDp == 0f)
     check("挖孔为负时按 0 处理", ReaderHud.band(-100f, 18f).topDp == band1x.topDp)
+    // 显示/隐藏状态栏时正文位置不变: the band is a function of the cutout only, never
+    // of the system status bar. The reader passes only the cutout in; what is
+    // asserted here is that the same input always produces the same band, so a
+    // transient system bar cannot re-inset the body or repaginate the chapter under
+    // the reader's eyes.
+    check(
+        "同样的挖孔总是得到同样的顶部预留",
+        ReaderHud.band(0f, 18f).topDp == ReaderHud.band(0f, 18f).topDp,
+    )
+    check(
+        "没有挖孔时顶部预留就是上边距加一行",
+        ReaderHud.band(0f, 18f).topDp == ReaderHud.TOP_EDGE_DP + 18f + ReaderHud.GAP_DP,
+        "${ReaderHud.band(0f, 18f).topDp}",
+    )
 
     println()
     println("== 已缓存的书移入书架 ==")
@@ -2078,6 +2121,88 @@ fun main() {
             )
         }
     }
+
+    println()
+    println("== 线路健康度（网络连接优化） ==")
+    //
+    // A host that just timed out must not be waited on again by the next request,
+    // but it must also never be *removed*: a network that is briefly down would
+    // otherwise leave nothing to try and the app would report "没有可用的访问线路"
+    // for a minute after the connection came back. Both halves are asserted, and
+    // the clock is injected so the cooldown arithmetic is exercised without sleeping.
+    var clockNow = 1_000_000L
+    val health = RouteHealth(cooldownMs = 90_000L, clock = { clockNow })
+    val routes = listOf("gh-proxy", "ghproxy", "jsdelivr")
+
+    check("初始时没有线路在冷却", routes.none { health.isCoolingDown(it) })
+    check("初始顺序不变", health.order(routes) { it } == routes)
+
+    // One failure is not enough: a single timeout is as often a dropped packet.
+    health.recordFailure("ghproxy")
+    check("失败一次不进入冷却", !health.isCoolingDown("ghproxy"))
+    check("失败一次顺序不变", health.order(routes) { it } == routes)
+
+    health.recordFailure("ghproxy")
+    check("连续失败两次进入冷却", health.isCoolingDown("ghproxy"))
+    check(
+        "冷却的线路被移到队尾而不是移除",
+        health.order(routes) { it } == listOf("gh-proxy", "jsdelivr", "ghproxy"),
+        "${health.order(routes) { it }}",
+    )
+    check("冷却后线路数量不变", health.order(routes) { it }.size == routes.size)
+
+    // The cooldown has to *expire*: a route that came back (a VPN switched on) must be
+    // usable again without restarting the app.
+    clockNow += 89_000L
+    check("冷却期内仍在队尾", health.isCoolingDown("ghproxy"))
+    clockNow += 2_000L
+    check("冷却结束后恢复", !health.isCoolingDown("ghproxy"))
+    check("冷却结束后回到原来的位置", health.order(routes) { it } == routes)
+
+    // A success clears the history outright rather than halving it: the route is
+    // demonstrably working, so a stale count must not demote it again.
+    health.recordFailure("jsdelivr")
+    health.recordFailure("jsdelivr")
+    check("jsdelivr 冷却中", health.isCoolingDown("jsdelivr"))
+    health.recordSuccess("jsdelivr")
+    check("成功后冷却立即解除", !health.isCoolingDown("jsdelivr"))
+
+    // Failures an hour apart are two unrelated hiccups, not "the route is down".
+    health.recordFailure("gh-proxy")
+    clockNow += 3_600_000L
+    health.recordFailure("gh-proxy")
+    check("相隔很久的两次失败不累计", !health.isCoolingDown("gh-proxy"))
+
+    // 检测线路 is an explicit re-check, so it must not be filtered by old history.
+    health.recordFailure("ghproxy")
+    health.recordFailure("ghproxy")
+    check("检测线路前处于冷却", health.isCoolingDown("ghproxy"))
+    health.forgetAll()
+    check("检测线路会清空冷却记录", !health.isCoolingDown("ghproxy"))
+
+    // Several cooling routes keep their relative order among themselves, so the race
+    // order is still the tie-break rather than completion order.
+    val h2 = RouteHealth(cooldownMs = 90_000L, clock = { clockNow })
+    h2.recordFailure("b")
+    h2.recordFailure("b")
+    h2.recordFailure("c")
+    h2.recordFailure("c")
+    check(
+        "多条冷却线路之间保持原顺序",
+        h2.order(listOf("a", "b", "c", "d")) { it } == listOf("a", "d", "b", "c"),
+        "${h2.order(listOf("a", "b", "c", "d")) { it }}",
+    )
+    // All cooling is the case a *filter* would break: nothing may be dropped.
+    val h3 = RouteHealth(cooldownMs = 90_000L, clock = { clockNow })
+    for (r in listOf("a", "b", "c")) {
+        h3.recordFailure(r)
+        h3.recordFailure(r)
+    }
+    check(
+        "全部线路都在冷却时仍全部保留",
+        h3.order(listOf("a", "b", "c")) { it }.toSet() == setOf("a", "b", "c"),
+        "${h3.order(listOf("a", "b", "c")) { it }}",
+    )
 
     println()
     if (failures == 0) {

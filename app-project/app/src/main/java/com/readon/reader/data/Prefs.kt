@@ -102,14 +102,21 @@ class Prefs(context: Context) {
      * them after a successful race and reads them to put the known-good host
      * first. Storing them is what turns "try nine hosts every time" into "try the
      * one that works".
+     *
+     * Written through [editQuiet], and that is load-bearing rather than tidy:
+     * every successful transfer would otherwise bump [revision], which is the
+     * signal 主页 treats as "a setting changed, re-read everything". A book read
+     * online fetches a prefix and then a chunk every few megabytes, so the whole
+     * library was being re-validated several times per book -- and the reader
+     * itself recomposed each time -- for a value the user never chose.
      */
     var preferredMirror: String
         get() = sp.getString(K_PREFERRED_MIRROR, "").orEmpty()
-        set(v) = edit { putString(K_PREFERRED_MIRROR, v) }
+        set(v) = editQuiet { putString(K_PREFERRED_MIRROR, v) }
 
     var preferredListSource: String
         get() = sp.getString(K_PREFERRED_LIST, "").orEmpty()
-        set(v) = edit { putString(K_PREFERRED_LIST, v) }
+        set(v) = editQuiet { putString(K_PREFERRED_LIST, v) }
 
     /**
      * Prefix for the custom route, e.g. a self-hosted proxy. Only used when the
@@ -253,7 +260,7 @@ class Prefs(context: Context) {
 
     var ignoredVersionCode: Int
         get() = sp.getInt(K_IGNORED_VERSION, 0)
-        set(v) = edit { putInt(K_IGNORED_VERSION, v) }
+        set(v) = editQuiet { putInt(K_IGNORED_VERSION, v) }
 
     var autoCheckUpdates: Boolean
         get() = sp.getBoolean(K_AUTO_UPDATE, true)
@@ -261,7 +268,7 @@ class Prefs(context: Context) {
 
     var lastUpdateCheck: Long
         get() = sp.getLong(K_LAST_CHECK, 0L)
-        set(v) = edit { putLong(K_LAST_CHECK, v) }
+        set(v) = editQuiet { putLong(K_LAST_CHECK, v) }
 
     // --- home screen memory ------------------------------------------------
     /**
