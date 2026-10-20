@@ -2205,6 +2205,237 @@ fun main() {
     )
 
     println()
+    println("== 书架书组与批量编辑 ==")
+    //
+    // The shelf's new structure is arithmetic with silent failure modes: a
+    // favourite that leaves its group, a group that splits in two because of a
+    // trailing space, a selection that outlives the book it names. All of it is
+    // pure, so all of it is asserted here rather than eyeballed on a phone.
+
+    fun shelved(
+        id: String,
+        title: String = id,
+        group: String? = null,
+        favorite: Boolean = false,
+        lastReadAt: Long = 0L,
+        folder: String = "默认",
+    ) = Book(
+        id = id, title = title, author = null, folder = folder, path = "$title.txt",
+        format = "txt", size = 0, owner = "o", repo = "r", branch = "b",
+        lastReadAt = lastReadAt, group = group, favorite = favorite,
+    )
+
+    // --- normalisation -----------------------------------------------------
+    check("空书名组归一化为 null", ShelfGroups.normalize("") == null)
+    check("空白书组归一化为 null", ShelfGroups.normalize("   \t\n ") == null)
+    check("只有控制字符的书组归一化为 null", ShelfGroups.normalize("\u0000\u0001") == null)
+    check("前后空白被去掉", ShelfGroups.normalize("  科幻  ") == "科幻")
+    check(
+        "中间连续空白折叠成一个空格",
+        ShelfGroups.normalize("科   幻") == "科 幻",
+        ShelfGroups.normalize("科   幻").orEmpty(),
+    )
+    check(
+        "同名但空白不同的书组是同一个",
+        ShelfGroups.normalize("科幻 ") == ShelfGroups.normalize(" 科幻"),
+    )
+    check(
+        "过长的书组名被截断",
+        (ShelfGroups.normalize("一".repeat(40)) ?: "").length == ShelfGroups.MAX_NAME_LENGTH,
+        "${ShelfGroups.normalize("一".repeat(40))?.length}",
+    )
+    check("没有书组的书落在未分组", ShelfGroups.groupOf(shelved("a")) == ShelfGroups.DEFAULT_NAME)
+    check("只有空白的书组也落在未分组", ShelfGroups.groupOf(shelved("a", group = "  ")) == ShelfGroups.DEFAULT_NAME)
+    check("有书组的书用它自己的名字", ShelfGroups.groupOf(shelved("a", group = " 科幻 ")) == "科幻")
+
+    // --- sections ----------------------------------------------------------
+    val library = listOf(
+        shelved("a", title="A", group = "科幻", lastReadAt = 500),
+        shelved("b", title="B", group = "科幻", lastReadAt = 100),
+        shelved("c", title="C", group = "历史", favorite = true, lastReadAt = 300),
+        shelved("d", title="D", lastReadAt = 0),
+        shelved("e", title="E", group = "历史", favorite = true, lastReadAt = 400),
+    )
+    val sections = ShelfGroups.sections(library, ShelfGroups.Order.Recent)
+
+    check("收藏排在第一段", sections.firstOrNull()?.pinned == true, "${sections.map { it.name }}")
+    check("未分组排在最后一段", sections.lastOrNull()?.default == true, "${sections.map { it.name }}")
+    check(
+        "收藏段包含全部收藏的书",
+        sections.first().books.map { it.id }.sorted() == listOf("c", "e"),
+        "${sections.first().books.map { it.id }}",
+    )
+    check(
+        "收藏的书仍留在自己的书组里",
+        sections.first { it.name == "历史" }.books.map { it.id }.sorted() == listOf("c", "e"),
+        "${sections.first { it.name == "历史" }.books.map { it.id }}",
+    )
+    check(
+        "收藏段不把书从原书组里移走",
+        sections.first { it.name == "科幻" }.books.map { it.id } == listOf("a", "b"),
+        "${sections.first { it.name == "科幻" }.books.map { it.id }}",
+    )
+    check("没有收藏时没有收藏段", ShelfGroups.sections(library.map { it.copy(favorite = false) }, ShelfGroups.Order.Recent).none { it.pinned })
+    check("空书架没有段落", ShelfGroups.sections(emptyList(), ShelfGroups.Order.Recent).isEmpty())
+    check(
+        "书组按名称排序",
+        sections.filter { !it.pinned && !it.default }.map { it.name } == listOf("历史", "科幻"),
+        "${sections.filter { !it.pinned && !it.default }.map { it.name }}",
+    )
+    check(
+        "每本书在每个段里只出现一次",
+        sections.filter { !it.pinned }.flatMap { s -> s.books.map { it.id } }
+            .let { it.size == it.toSet().size },
+    )
+    check(
+        "收藏段里按最近阅读排",
+        sections.first().books.map { it.id } == listOf("e", "c"),
+        "${sections.first().books.map { it.id }}",
+    )
+    check(
+        "从未阅读的书排在最近阅读的最后",
+        ShelfGroups.order(library, ShelfGroups.Order.Recent).last().lastReadAt == 0L,
+        "${ShelfGroups.order(library, ShelfGroups.Order.Recent).map { it.title }}",
+    )
+
+    // A group whose only member is starred must still be a section: pinning a
+    // book must not empty the heading it came from.
+    val single = listOf(shelved("x", group = "科幻", favorite = true))
+    val singleSections = ShelfGroups.sections(single, ShelfGroups.Order.Recent)
+    check(
+        "唯一成员被收藏后原书组仍在",
+        singleSections.map { it.name } == listOf(ShelfGroups.FAVORITE_NAME, "科幻"),
+        "${singleSections.map { it.name }}",
+    )
+
+    // A shelf where every book is ungrouped is one 未分组 section, and a lone
+    // heading over the whole grid is noise. The moment there is anything to
+    // compare it with, the heading earns its place.
+    val plain = listOf(shelved("a"), shelved("b"))
+    val plainSections = ShelfGroups.sections(plain, ShelfGroups.Order.Recent)
+    check(
+        "全部未分组时只有一个段落",
+        plainSections.size == 1 && plainSections.single().default,
+        "${plainSections.map { it.name }}",
+    )
+    check(
+        "唯一的未分组段落不画标题",
+        !ShelfGroups.showsHeading(plainSections.single(), plainSections.size),
+    )
+    check(
+        "有书组时未分组也画标题",
+        ShelfGroups.showsHeading(sections.last(), sections.size),
+        "${sections.map { it.name }}",
+    )
+    check(
+        "收藏段总是画标题",
+        ShelfGroups.showsHeading(sections.first(), sections.size),
+    )
+
+    // --- the group picker's list -------------------------------------------
+    check(
+        "书组列表去重并排序",
+        ShelfGroups.names(library) == listOf("历史", "未分组", "科幻"),
+        "${ShelfGroups.names(library)}",
+    )
+    check(
+        "没有书组的书只提供未分组",
+        ShelfGroups.names(listOf(shelved("a"))) == listOf(ShelfGroups.DEFAULT_NAME),
+        "${ShelfGroups.names(listOf(shelved("a")))}",
+    )
+    check("空书架的列表仍可移出书组", ShelfGroups.names(emptyList()) == listOf(ShelfGroups.DEFAULT_NAME))
+
+    // --- batch selection ---------------------------------------------------
+    var sel = emptySet<String>()
+    sel = ShelfGroups.toggle(sel, "a")
+    check("选中一本", sel == setOf("a"))
+    sel = ShelfGroups.toggle(sel, "b")
+    check("再选中一本", sel == setOf("a", "b"))
+    sel = ShelfGroups.toggle(sel, "a")
+    check("再点一次取消选中", sel == setOf("b"))
+    check(
+        "全选返回全部",
+        ShelfGroups.toggleAll(emptySet(), listOf("a", "b", "c")) == setOf("a", "b", "c"),
+    )
+    check(
+        "已全选时再全选是清空",
+        ShelfGroups.toggleAll(setOf("a", "b", "c"), listOf("a", "b", "c")).isEmpty(),
+    )
+    check(
+        "部分选中时全选补满",
+        ShelfGroups.toggleAll(setOf("a"), listOf("a", "b")) == setOf("a", "b"),
+    )
+    check("空列表不算全选", !ShelfGroups.allSelected(emptySet(), emptyList()))
+    check("全部选中时 allSelected", ShelfGroups.allSelected(setOf("a", "b"), listOf("a", "b")))
+    // The prune is the guard against a selection that outlives its books: after a
+    // delete, a re-download can reuse an id, and a stale selection would arrive
+    // with a book the user never chose already ticked.
+    check(
+        "被删除的书从选择里消失",
+        ShelfGroups.prune(setOf("a", "b"), listOf("a")) == setOf("a"),
+        "${ShelfGroups.prune(setOf("a", "b"), listOf("a"))}",
+    )
+    check(
+        "删光选中的书后选择为空",
+        ShelfGroups.prune(setOf("a", "b"), listOf("c")).isEmpty(),
+        "${ShelfGroups.prune(setOf("a", "b"), listOf("c"))}",
+    )
+    check(
+        "仍在书架上的选择保留",
+        ShelfGroups.prune(setOf("a", "b"), listOf("a", "b", "c")) == setOf("a", "b"),
+    )
+    check("选择顺序稳定", ShelfGroups.ordered(setOf("c", "a", "b")) == listOf("a", "b", "c"))
+    check("选择计数文案", ShelfGroups.selectionLabel(3) == "已选 3 本", ShelfGroups.selectionLabel(3))
+
+    // --- the batch 收藏 button --------------------------------------------
+    val mixed = listOf(shelved("a", favorite = true), shelved("b", favorite = false))
+    check(
+        "混合选择时按钮是收藏",
+        ShelfGroups.favoriteActionLabel(mixed) == "收藏",
+        ShelfGroups.favoriteActionLabel(mixed),
+    )
+    check(
+        "混合选择时不会取消已有的收藏",
+        ShelfGroups.favoriteActionValue(mixed),
+    )
+    check(
+        "全部已收藏时按钮是取消收藏",
+        ShelfGroups.favoriteActionLabel(listOf(shelved("a", favorite = true))) == "取消收藏",
+        ShelfGroups.favoriteActionLabel(listOf(shelved("a", favorite = true))),
+    )
+    check(
+        "全部已收藏时按钮方向是取消",
+        !ShelfGroups.favoriteActionValue(listOf(shelved("a", favorite = true))),
+    )
+    check("空选择时按钮是收藏", ShelfGroups.favoriteActionLabel(emptyList()) == "收藏")
+
+    // The two structural headings are not available as group names: a user-made
+    // "收藏" would render as a second, identical-looking heading holding other
+    // books, and there would be no way to tell which is which.
+    check("收藏是保留名", ShelfGroups.isReserved("收藏"))
+    check("未分组是保留名", ShelfGroups.isReserved("未分组"))
+    check("保留名忽略大小写与空白", ShelfGroups.isReserved(" 收藏 "))
+    check("普通名字不是保留名", !ShelfGroups.isReserved("科幻"))
+    check("空名字不是保留名", !ShelfGroups.isReserved(null))
+    check(
+        "按钮文案与方向来自同一个判断（取消收藏不会变成收藏）",
+        ShelfGroups.favoriteAction(listOf(shelved("a", favorite = true))).let {
+            it.label == "取消收藏" && !it.favorite
+        },
+    )
+
+    // --- labels ------------------------------------------------------------
+    check(
+        "书组标题带数量",
+        ShelfGroups.headingLabel("科幻", 12) == "科幻 · 12",
+        ShelfGroups.headingLabel("科幻", 12),
+    )
+    check("空书组标题不带数量", ShelfGroups.headingLabel("科幻", 0) == "科幻")
+    check("书组筛选忽略大小写", ShelfGroups.matches("SciFi", "sci"))
+    check("空查询匹配全部", ShelfGroups.matches("科幻", "  "))
+    check("不匹配时不显示", !ShelfGroups.matches("科幻", "历史"))
+
+    println()
     if (failures == 0) {
         println("全部通过")
     } else {

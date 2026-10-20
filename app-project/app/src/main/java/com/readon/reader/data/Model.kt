@@ -87,6 +87,31 @@ data class Book(
      * indexes read back as 0 rather than failing).
      */
     val chapterCount: Int = 0,
+    /**
+     * The user-made shelf group this book belongs to, or null for the default
+     * ("未分组") one.
+     *
+     * Deliberately *not* [folder]: the folder is where the file came from in the
+     * repository, and the shelf has always shown it as 分类. A group is a
+     * shelf-side decision the user makes -- "these five are what I am reading this
+     * month" -- and it has to be able to cut across folders, because a group that
+     * could only hold one folder would already exist.
+     *
+     * Null rather than a string constant for "ungrouped": Gson leaves an absent
+     * field at its Java default, so every record written before this field existed
+     * reads back as null -- i.e. exactly "ungrouped" -- instead of failing to
+     * parse or inventing a group named "null".
+     */
+    val group: String? = null,
+    /**
+     * Whether the book is pinned to the top of the shelf with a mark.
+     *
+     * A shelf-side flag, like [group]. Kept separate from [group] rather than
+     * modelled as a "收藏" group: a favourite is still in whatever group it was
+     * in, and it is pinned *above* that group's heading rather than moved into a
+     * heading of its own. See [ShelfGroups].
+     */
+    val favorite: Boolean = false,
 ) {
     val downloaded: Boolean get() = localFile != null
 

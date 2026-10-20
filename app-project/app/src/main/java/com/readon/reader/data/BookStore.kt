@@ -54,6 +54,10 @@ class BookStore(private val context: Context) {
      * [updateProgress]: the reader writes progress on every page turn, and a
      * signal there would make the shelf re-read the whole index from disk dozens
      * of times a minute while the user is reading.
+     *
+     * It *is* bumped by [setGroup] and [setFavorite], because a book's group and
+     * its star are part of what the shelf draws. Nothing in the reader writes
+     * those, so there is no per-page-turn write to worry about.
      */
     val revision: StateFlow<Int> = _revision.asStateFlow()
 
@@ -135,6 +139,12 @@ class BookStore(private val context: Context) {
                         chapterIndex = old.chapterIndex,
                         chapterCount = old.chapterCount,
                         lastReadAt = old.lastReadAt,
+                        // The user's own shelf decisions belong to the *book*, not
+                        // to the copy of its bytes that was just replaced: a
+                        // re-download must not quietly move a book out of its group
+                        // or unstar it.
+                        group = old.group,
+                        favorite = old.favorite,
                     )
                 } else {
                     current.add(record)
@@ -204,6 +214,10 @@ class BookStore(private val context: Context) {
                     chapterIndex = old.chapterIndex,
                     chapterCount = old.chapterCount,
                     lastReadAt = old.lastReadAt,
+                    // Same rule as a re-download: re-importing a file the user
+                    // already had must not move it out of its group.
+                    group = old.group,
+                    favorite = old.favorite,
                 )
             } else {
                 current.add(record)
@@ -258,6 +272,111 @@ class BookStore(private val context: Context) {
             _revision.value = _revision.value + 1
         }
     }
+
+    /**
+     * Delete several books in one pass over the index.
+     *
+     * One read, one write, one revision bump rather than N of each. The batch
+     * shelf has to delete a selection that can be the whole library, and doing
+     * that one `delete` at a time would rewrite a JSON index -- and bump the
+     * revision the shelf observes -- a few hundred times in a row, so the grid
+     * would re-read and re-sort itself once per deleted book while the user
+     * watched.
+     *
+     * Files are removed before the index is written, and a file that cannot be
+     * removed does not stop the record from being dropped: a record pointing at a
+     * file that is still there is the *worse* outcome (it would reappear on the
+     * shelf and be unopenable). The stray bytes are reported by [usedBytes]
+     * until the next `clearAll`.
+     *
+     * @return the ids that were actually found and removed, so the caller can
+     *   clear their bookmarks and report an honest count.
+     */
+    suspend fun deleteAll(ids: Collection<String>): List<String> = withContext(Dispatchers.IO) {
+        if (ids.isEmpty()) return@withContext emptyList()
+        lock.withLock {
+            val wanted = ids.toSet()
+            val current = readIndex()
+            val removed = ArrayList<String>(wanted.size)
+            val kept = ArrayList<Book>(current.size)
+            for (book in current) {
+                if (book.id in wanted) {
+                    book.localFile?.let { runCatching { File(it).delete() } }
+                    removed.add(book.id)
+                } else {
+                    kept.add(book)
+                }
+            }
+            if (removed.isEmpty()) return@withLock emptyList()
+            write(kept)
+            _revision.value = _revision.value + 1
+            removed
+        }
+    }
+
+    /**
+     * Put books into a group, or take them out of one with `group == null`.
+     *
+     * The name is canonicalised through [ShelfGroups.normalize] here rather than
+     * at the call site: it is the one place every write passes through, and a
+     * group whose name differs by a trailing space would render as a second
+     * heading identical to the first -- which the user cannot see, let alone fix.
+     *
+     * @return how many books changed, so the caller's message can say "已加入 3 本"
+     *   rather than claiming to have moved books that were already there.
+     */
+    suspend fun setGroup(ids: Collection<String>, group: String?): Int =
+        withContext(Dispatchers.IO) {
+            if (ids.isEmpty()) return@withContext 0
+            lock.withLock {
+                val wanted = ids.toSet()
+                val canonical = ShelfGroups.normalize(group)
+                val current = readIndex()
+                var changed = 0
+                for (i in current.indices) {
+                    val book = current[i]
+                    if (book.id !in wanted) continue
+                    if (ShelfGroups.normalize(book.group) == canonical) continue
+                    current[i] = book.copy(group = canonical)
+                    changed++
+                }
+                if (changed > 0) {
+                    write(current)
+                    _revision.value = _revision.value + 1
+                }
+                changed
+            }
+        }
+
+    /**
+     * Star or unstar books.
+     *
+     * @return how many books changed state. Already-starred books are not counted
+     *   and, more importantly, are not rewritten: a batch "收藏" over a mixed
+     *   selection must not un-star the ones that were already favourites, and
+     *   `favorite = true` rather than a toggle is what guarantees that.
+     */
+    suspend fun setFavorite(ids: Collection<String>, favorite: Boolean): Int =
+        withContext(Dispatchers.IO) {
+            if (ids.isEmpty()) return@withContext 0
+            lock.withLock {
+                val wanted = ids.toSet()
+                val current = readIndex()
+                var changed = 0
+                for (i in current.indices) {
+                    val book = current[i]
+                    if (book.id !in wanted) continue
+                    if (book.favorite == favorite) continue
+                    current[i] = book.copy(favorite = favorite)
+                    changed++
+                }
+                if (changed > 0) {
+                    write(current)
+                    _revision.value = _revision.value + 1
+                }
+                changed
+            }
+        }
 
     /** Total bytes occupied by downloaded books. */
     suspend fun usedBytes(): Long = withContext(Dispatchers.IO) {

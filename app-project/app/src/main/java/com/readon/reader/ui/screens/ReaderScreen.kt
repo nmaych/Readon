@@ -4,7 +4,6 @@ import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -1354,17 +1353,6 @@ private fun ScrollReader(
                 }
             },
     ) {
-        // Clearance for the chrome itself, on top of the status bands. Zero while the
-        // chrome is hidden, and animated with it, so a page in the normal reading state
-        // uses the whole screen instead of reserving room for bars that are not drawn.
-        val chromeFraction by animateFloatAsState(
-            targetValue = if (state.chromeVisible) 1f else 0f,
-            animationSpec = tween(180),
-            label = "chromeClearance",
-        )
-        val chromeTopExtra = CHROME_TOP_EXTRA * chromeFraction
-        val chromeBottomExtra = CHROME_BOTTOM_EXTRA * chromeFraction
-
         val ready = blocks
         if (ready == null) {
             // Still splitting. The chrome is drawn over this, so the reader sees
@@ -1401,27 +1389,34 @@ private fun ScrollReader(
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    // The chrome is drawn *over* the window, so the first and last
-                    // paragraphs have to be pushed clear of it or they are unreadable
-                    // behind it.
+                    // **No clearance for the chrome**, and that is the fix for
+                    // 显示/隐藏状态栏时滚动模式下正文还会移动.
                     //
-                    // The extra clearance belongs to the *chrome*, not to the page, so
-                    // it is only applied while the chrome is up and it animates in and
-                    // out with it. Before this it was a constant `+60.dp` /
-                    // `max(.., 92.dp)` on every frame, which meant a reader whose
-                    // toolbar was hidden -- the normal state while reading -- had a
-                    // 60 dp empty band above the first paragraph and up to 92 dp below
-                    // the last one. That is a third of a phone screen spent reserving
-                    // room for something that is not drawn.
+                    // The padding used to carry `CHROME_TOP_EXTRA` / `CHROME_BOTTOM_EXTRA`
+                    // (60 / 92 dp) while the toolbar was up, animated over 180 ms. In
+                    // scrolling mode that is not clearance, it is *content movement*:
+                    // `contentPadding` is part of the list's layout, so every change to
+                    // it shifts the whole column -- the line the reader is on slides
+                    // down 60 dp as the toolbar appears and back up as it goes away, on
+                    // every tap in the middle of the screen. The old comment above the
+                    // window says the reason padding cannot solve the 状态行遮挡 problem;
+                    // it is equally true that padding must not be used to make room for
+                    // an overlay.
                     //
-                    // The status bands are *not* part of this padding any more: they
-                    // are the edge of the window itself (see above), so adding them here
-                    // as well would inset the text twice.
+                    // So the toolbar is an overlay, and the prose keeps its place. The
+                    // first and last paragraphs can pass *under* the bars while they are
+                    // up -- which is what an overlay means -- and the bars are opaque
+                    // page colour, so what is under them is not readable-but-messy, it
+                    // is simply covered until the reader taps again.
+                    //
+                    // The status bands are *not* part of this padding either: they are
+                    // the edge of the window itself (see above), so adding them here as
+                    // well would inset the text twice.
                     contentPadding = PaddingValues(
                         start = horizontalPadding,
                         end = horizontalPadding,
-                        top = verticalPadding + chromeTopExtra,
-                        bottom = verticalPadding + chromeBottomExtra,
+                        top = verticalPadding,
+                        bottom = verticalPadding,
                     ),
                 ) {
                     itemsIndexed(ready) { _, block ->
@@ -1514,24 +1509,6 @@ private val HUD_LINE = 18.sp
  */
 private val CHROME_TOP_EDGE_MIN = ReaderHud.TOP_EDGE_DP.dp
 private val CHROME_BOTTOM_EDGE_MIN = ReaderHud.EDGE_DP.dp
-
-/**
- * Extra clearance the reader's top bar needs above the status band.
- *
- * One icon button's height (~48 dp) plus its own 4 dp vertical padding, rounded up. Only
- * reserved while the bar is actually showing -- see the `chromeFraction` in
- * [ScrollReader] -- because reserving it permanently cost a hidden toolbar's worth of
- * blank page on every frame of ordinary reading.
- */
-private val CHROME_TOP_EXTRA = 60.dp
-
-/**
- * Extra clearance the reader's bottom bar needs above the footer band.
- *
- * The progress bar, the position row and the action row: ~92 dp. Same rule as
- * [CHROME_TOP_EXTRA] -- only while the bar is drawn.
- */
-private val CHROME_BOTTOM_EXTRA = 92.dp
 
 /**
  * How tall the fade at the top and bottom of the scrolling content window is.
