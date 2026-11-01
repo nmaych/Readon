@@ -110,4 +110,28 @@ object Chapters {
         }
         return chapters.last().index
     }
+
+    /**
+     * Where the heading line of [chapter] ends in [text], or -1 if it has none.
+     *
+     * The reader draws a chapter's heading larger and bolder than the prose under
+     * it, and the heading is not a node of its own -- it is simply the chapter's
+     * first line. This is the range that has to be emphasised, and it is computed
+     * here rather than in the reader so it is the same range for both reading
+     * modes.
+     *
+     * The `-1` is not defensive. [split] synthesises a 前言 chapter for whatever
+     * sits before the first real heading, and that chapter has no heading line --
+     * the word appears nowhere in the book. Checking that the line actually reads
+     * back as [Chapter.title] is what tells the two apart, and emphasising the
+     * first line of the front matter instead would put a large bold sentence at
+     * the top of an otherwise normal chapter.
+     */
+    fun headingLineEnd(text: String, chapter: Chapter): Int {
+        if (chapter.start < 0 || chapter.start >= text.length) return -1
+        val newline = text.indexOf('\n', chapter.start)
+        val end = if (newline < 0) chapter.end else minOf(newline, chapter.end)
+        if (end <= chapter.start) return -1
+        return if (text.substring(chapter.start, end).trim() == chapter.title) end else -1
+    }
 }

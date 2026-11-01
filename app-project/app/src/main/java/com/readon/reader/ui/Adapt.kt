@@ -261,6 +261,16 @@ object Adapt {
     const val READER_PADDING_MIN_DP = 22
 
     /**
+     * The largest extra margin the reader offers, in dp.
+     *
+     * On top of the derived margin, which is what actually bounds the column. The
+     * cap exists because on a narrow phone this is *subtracted from* the text
+     * column: unbounded, it would eventually leave no room for a line of text at
+     * all, and the reader would draw a page one character wide.
+     */
+    const val READER_PADDING_EXTRA_MAX_DP = 40
+
+    /**
      * How wide the reader's text column is on a window [windowDp] across.
      *
      * Exposed separately from the padding so the paginator and the drawn column
@@ -276,17 +286,23 @@ object Adapt {
     }
 
     /**
-     * The reader's horizontal margin, in dp.
+     * The reader's horizontal margin, in dp, plus the reader's own [extraDp].
      *
-     * Derived from [readerTextWidthDp] rather than computed independently, so the
-     * two always add up to the window: half of whatever the capped column leaves
-     * over, never less than [READER_PADDING_MIN_DP]. Deriving it is what keeps a
-     * 1200 dp tablet from laying out a 1150 dp line.
+     * The derived part comes from [readerTextWidthDp] rather than being computed
+     * independently, so the two always add up to the window: half of whatever the
+     * capped column leaves over, never less than [READER_PADDING_MIN_DP]. Deriving
+     * it is what keeps a 1200 dp tablet from laying out a 1150 dp line.
+     *
+     * [extraDp] is the 页边距 setting, clamped to
+     * `0..`[READER_PADDING_EXTRA_MAX_DP]. It is deliberately *added* rather than
+     * used as the margin itself: the reader asks for "more room at the sides", and
+     * the column cap is a separate concern that must keep working on a tablet.
      */
-    fun readerHorizontalPaddingDp(windowDp: Int): Int {
-        if (windowDp <= 0) return READER_PADDING_MIN_DP
+    fun readerHorizontalPaddingDp(windowDp: Int, extraDp: Int = 0): Int {
+        val extra = extraDp.coerceIn(0, READER_PADDING_EXTRA_MAX_DP)
+        if (windowDp <= 0) return READER_PADDING_MIN_DP + extra
         val leftover = windowDp - readerTextWidthDp(windowDp)
-        return (leftover / 2).coerceAtLeast(READER_PADDING_MIN_DP)
+        return (leftover / 2).coerceAtLeast(READER_PADDING_MIN_DP) + extra
     }
 
     /**

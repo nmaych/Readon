@@ -89,6 +89,7 @@ import com.readon.reader.data.formatSize
 import com.readon.reader.net.ListSource
 import com.readon.reader.net.Mirror
 import com.readon.reader.reader.AutoRead
+import com.readon.reader.ui.Adapt
 import com.readon.reader.ui.collectAsStateSafe
 import com.readon.reader.ui.components.MarkdownView
 import com.readon.reader.ui.theme.ReaderFont
@@ -333,6 +334,53 @@ fun SettingsScreen(
                             modifier = Modifier.width(160.dp),
                         )
                     }
+
+                    HorizontalDivider(Modifier.padding(vertical = 10.dp))
+
+                    // --- chapter heading ------------------------------------
+                    //
+                    // The heading is the chapter's first line of prose rather
+                    // than a view of its own, so this is a text setting: a size
+                    // relative to 字号, and whether it is bold as well.
+                    SettingRow(
+                        title = "章节标题",
+                        subtitle = String.format("%.0f%%", snapshot.chapterTitleScale * 100f),
+                    ) {
+                        Slider(
+                            value = snapshot.chapterTitleScale,
+                            onValueChange = { prefs.chapterTitleScale = it },
+                            valueRange = Prefs.MIN_TITLE_SCALE..Prefs.MAX_TITLE_SCALE,
+                            steps = 11,
+                            modifier = Modifier.width(160.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    SwitchRow(
+                        title = "章节标题加粗",
+                        checked = snapshot.chapterTitleBold,
+                        onCheckedChange = { prefs.chapterTitleBold = it },
+                    )
+
+                    HorizontalDivider(Modifier.padding(vertical = 10.dp))
+
+                    SettingRow(
+                        title = "页边距",
+                        subtitle = "左右各 +${snapshot.readerMarginDp} dp",
+                    ) {
+                        Slider(
+                            value = snapshot.readerMarginDp.toFloat(),
+                            onValueChange = { prefs.readerMarginDp = it.toInt() },
+                            valueRange = 0f..Adapt.READER_PADDING_EXTRA_MAX_DP.toFloat(),
+                            steps = 7,
+                            modifier = Modifier.width(160.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "在自动留白的基础上再加宽，屏幕越宽留白越多。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
 
                     HorizontalDivider(Modifier.padding(vertical = 10.dp))
 
@@ -950,6 +998,9 @@ private data class SettingsSnapshot(
     val readingMode: ReadingMode,
     val fontSize: Float,
     val lineSpacing: Float,
+    val chapterTitleScale: Float,
+    val chapterTitleBold: Boolean,
+    val readerMarginDp: Int,
     val serif: Boolean,
     val keepScreenOn: Boolean,
     val autoReadEnabled: Boolean,
@@ -985,6 +1036,9 @@ private data class SettingsSnapshot(
                 readingMode = p.readingMode,
                 fontSize = p.fontSize,
                 lineSpacing = p.lineSpacing,
+                chapterTitleScale = p.chapterTitleScale,
+                chapterTitleBold = p.chapterTitleBold,
+                readerMarginDp = p.readerMarginDp,
                 serif = p.serif,
                 keepScreenOn = p.keepScreenOn,
                 autoReadEnabled = p.autoReadEnabled,

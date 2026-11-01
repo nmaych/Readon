@@ -97,6 +97,10 @@ object ReaderPalette {
         0xFF7A6A55.toInt(), // 棕
         0xFF1F3A5F.toInt(), // 藏青
         0xFF3A2F4A.toInt(), // 深紫
+        0xFF123A2E.toInt(), // 墨绿
+        0xFF5A2233.toInt(), // 枣红
+        0xFF2F4F6F.toInt(), // 靛蓝
+        0xFF4A3B22.toInt(), // 深褐
         0xFFC7CCD4.toInt(), // 夜间灰
         0xFFB9BEC6.toInt(), // 浅灰
         0xFFE8E8E8.toInt(), // 白

@@ -180,6 +180,22 @@ fun main() {
         check("indexAt 定位正确", Chapters.indexAt(chapters, target) == chapters[2].index)
     }
 
+    // The reader emphasises a chapter's first line, and that range has to be the
+    // heading itself -- not the front matter, which has no heading line at all.
+    if (chapters.size > 1) {
+        check("前言没有标题行", Chapters.headingLineEnd(novel, chapters.first()) == -1)
+        val first = chapters[1]
+        val lineEnd = Chapters.headingLineEnd(novel, first)
+        check("章节标题行在章内且有换行", lineEnd > first.start && lineEnd < novel.length && novel[lineEnd] == '\n', "$lineEnd")
+        check(
+            "标题行内容就是章节名",
+            novel.substring(first.start, lineEnd).trim() == first.title,
+            "${novel.substring(first.start, lineEnd)} vs ${first.title}",
+        )
+        check("每个真实章节都有标题行", chapters.drop(1).all { Chapters.headingLineEnd(novel, it) > it.start })
+        check("越界的章节不崩溃", Chapters.headingLineEnd(novel, Chapters.Chapter("x", -5, 10, 0)) == -1)
+    }
+
     // Smoke test that a large book splits quickly. The old implementation
     // allocated a String per line; this only materialises candidate headings.
     val huge = buildString {
@@ -690,6 +706,7 @@ fun main() {
     val paletteTexts = listOf(
         0xFF000000.toInt(), 0xFF1A1A1A.toInt(), 0xFF2B2620.toInt(), 0xFF3B3B3B.toInt(),
         0xFF5A5A5A.toInt(), 0xFF7A6A55.toInt(), 0xFF1F3A5F.toInt(), 0xFF3A2F4A.toInt(),
+        0xFF123A2E.toInt(), 0xFF5A2233.toInt(), 0xFF2F4F6F.toInt(), 0xFF4A3B22.toInt(),
         0xFFC7CCD4.toInt(), 0xFFB9BEC6.toInt(), 0xFFE8E8E8.toInt(), 0xFFFFFFFF.toInt(),
     )
 
@@ -1814,6 +1831,21 @@ fun main() {
     // widened a phone's margins would be a regression on the device most people use.
     check("窄窗口上边距保持 22dp", Adapt.readerHorizontalPaddingDp(411) == 22)
     check("窄窗口上文字宽度就是窗口减两边距", Adapt.readerTextWidthDp(411) == 411 - 44)
+
+    // The reader's own 页边距 preference is *added* to the derived margin, so a
+    // phone's layout is untouched at zero and the column only ever gets narrower.
+    check("未设置页边距时边距不变", Adapt.readerHorizontalPaddingDp(360, 0) == Adapt.readerHorizontalPaddingDp(360))
+    check("页边距按设置加宽", Adapt.readerHorizontalPaddingDp(360, 12) == 22 + 12, "${Adapt.readerHorizontalPaddingDp(360, 12)}")
+    check(
+        "页边距被夹在上限内",
+        Adapt.readerHorizontalPaddingDp(360, 999) == 22 + Adapt.READER_PADDING_EXTRA_MAX_DP,
+        "${Adapt.readerHorizontalPaddingDp(360, 999)}",
+    )
+    check("负页边距按 0 处理", Adapt.readerHorizontalPaddingDp(360, -8) == 22)
+    for (w in listOf(320, 360, 411, 480, 1200)) {
+        val padding = Adapt.readerHorizontalPaddingDp(w, Adapt.READER_PADDING_EXTRA_MAX_DP)
+        check("最大页边距下正文仍有宽度（${w}dp 窗口）", w - padding * 2 > 0, "$w - 2*$padding <= 0")
+    }
 
     // --- dialog width --------------------------------------------------------
     check("对话框宽度有上限", Adapt.dialogMaxWidthDp(2000) <= 600, "${Adapt.dialogMaxWidthDp(2000)}")

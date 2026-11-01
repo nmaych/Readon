@@ -94,6 +94,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -116,6 +118,7 @@ import com.readon.reader.data.BookLoader
 import com.readon.reader.data.Bookmark
 import com.readon.reader.data.Bookmarks
 import com.readon.reader.data.Chapters
+import com.readon.reader.data.Prefs
 import com.readon.reader.data.ReadingMode
 import com.readon.reader.data.ReaderInk
 import com.readon.reader.data.UnsupportedBookException
@@ -212,6 +215,9 @@ fun ReaderScreen(
     val readingMode = remember(revision) { prefs.readingMode }
     val keepAwake = remember(revision) { prefs.keepScreenOn }
     val autoReadSeconds = remember(revision) { prefs.autoReadSeconds }
+    val chapterTitleScale = remember(revision) { prefs.chapterTitleScale }
+    val chapterTitleBold = remember(revision) { prefs.chapterTitleBold }
+    val readerMarginDp = remember(revision) { prefs.readerMarginDp }
 
     LaunchedEffect(book.id, loadAttempt) {
         state.begin(book)
@@ -415,6 +421,27 @@ fun ReaderScreen(
         )
     }
 
+    /**
+     * The extra style a chapter heading is drawn with, on top of [textStyle].
+     *
+     * A `SpanStyle` rather than a second `TextStyle` because the heading is not a
+     * view of its own: it is the chapter's first line, and the only way to draw one
+     * line of a paragraph differently is to annotate its range. Both reading modes
+     * apply this to the same range, computed by [Chapters.headingLineEnd].
+     *
+     * Only the size and the weight are set. The colour and the typeface come from
+     * [textStyle], so a heading follows the theme and the reader's font instead of
+     * pinning its own -- and, measurably, a `SpanStyle` cannot carry a line height,
+     * so the heading inherits the body's line box and every line keeps the reader's
+     * line spacing.
+     */
+    val headingStyle = remember(fontSize, chapterTitleScale, chapterTitleBold) {
+        SpanStyle(
+            fontSize = (fontSize * chapterTitleScale).sp,
+            fontWeight = if (chapterTitleBold) FontWeight.Bold else FontWeight.Normal,
+        )
+    }
+
     Box(
         Modifier
             .fillMaxSize()
@@ -448,6 +475,7 @@ fun ReaderScreen(
                 state = state,
                 skin = skin,
                 textStyle = textStyle,
+                headingStyle = headingStyle,
                 font = font,
                 fontSize = fontSize,
                 lineSpacing = lineSpacing,
@@ -456,6 +484,9 @@ fun ReaderScreen(
                 backgroundColorOverride = backgroundColorOverride,
                 readingMode = readingMode,
                 autoReadSeconds = autoReadSeconds,
+                chapterTitleScale = chapterTitleScale,
+                chapterTitleBold = chapterTitleBold,
+                readerMarginDp = readerMarginDp,
                 measurer = measurer,
                 density = density,
                 onClose = onClose,
@@ -495,6 +526,7 @@ private fun ReaderBody(
     state: ReaderState,
     skin: ReaderSkin,
     textStyle: TextStyle,
+    headingStyle: SpanStyle,
     font: ReaderFont,
     fontSize: Float,
     lineSpacing: Float,
@@ -503,6 +535,9 @@ private fun ReaderBody(
     backgroundColorOverride: Int,
     readingMode: ReadingMode,
     autoReadSeconds: Int,
+    chapterTitleScale: Float,
+    chapterTitleBold: Boolean,
+    readerMarginDp: Int,
     measurer: TextMeasurer,
     density: Density,
     onClose: () -> Unit,
@@ -618,8 +653,12 @@ private fun ReaderBody(
         // another clips the last line mid-character.
         val windowWidthDp = with(density) { constraints.maxWidth.toDp().value.toInt() }
         // Derived from the capped column width, so the margin and the text column
-        // always add up to the window -- see [Adapt.readerHorizontalPaddingDp].
-        val horizontalPadding = Adapt.readerHorizontalPaddingDp(windowWidthDp).dp
+        // always add up to the window -- see [Adapt.readerHorizontalPaddingDp] --
+        // plus the 页边距 the reader asked for on top of it. Added here rather than
+        // at the two drawing sites because *this* is the single figure the paginator
+        // and the drawn column share; adding it in only one of them is the
+        // measured-at-one-width/drawn-at-another bug the note below is about.
+        val horizontalPadding = Adapt.readerHorizontalPaddingDp(windowWidthDp, readerMarginDp).dp
 
         // The page is measured in the *same pixels* it is drawn in.
         //
@@ -664,6 +703,7 @@ private fun ReaderBody(
                 pageWidthPx,
                 pageHeightPx,
                 textStyle,
+                headingStyle,
             ) {
                 if (pageWidthPx <= 0 || pageHeightPx <= 0) {
                     null
@@ -671,11 +711,22 @@ private fun ReaderBody(
                     // Paginate one chapter at a time. A novel is over a million
                     // characters; measuring it in one go would stall for seconds,
                     // and the chapter is the unit the user navigates in anyway.
+                    //
+                    // Annotated rather than plain: `headingStyle` makes the chapter's
+                    // first line larger, which changes how many lines fit. Measuring
+                    // the chapter without that span and drawing it with one would
+                    // overflow the page and clip its last line -- see [headingAnnotated].
                     val chapter = content.chapters.getOrNull(state.chapterIndex)
-                    val slice = if (chapter != null) {
-                        content.text.substring(chapter.start, chapter.end)
+                    val slice: CharSequence = if (chapter != null) {
+                        headingAnnotated(
+                            text = content.text,
+                            chapters = content.chapters,
+                            start = chapter.start,
+                            end = chapter.end,
+                            heading = headingStyle,
+                        )
                     } else {
-                        content.text
+                        AnnotatedString(content.text)
                     }
                     Paginator(
                         text = slice,
@@ -713,6 +764,7 @@ private fun ReaderBody(
                 state = state,
                 skin = skin,
                 textStyle = textStyle,
+                headingStyle = headingStyle,
                 horizontalPadding = horizontalPadding,
                 verticalPadding = verticalPadding,
                 topInset = topInset,
@@ -829,6 +881,9 @@ private fun ReaderBody(
                 font = font,
                 fontSize = fontSize,
                 lineSpacing = lineSpacing,
+                chapterTitleScale = chapterTitleScale,
+                chapterTitleBold = chapterTitleBold,
+                readerMarginDp = readerMarginDp,
                 theme = readerTheme,
                 textColorOverride = textColorOverride,
                 backgroundColorOverride = backgroundColorOverride,
@@ -1146,8 +1201,9 @@ private fun PagedReader(
             // last page it happens to have, which is a different page of the chapter
             // than the one the footer is counting.
             val index = state.pageInChapter.coerceIn(0, (paginator.pageCount - 1).coerceAtLeast(0))
+            val slice = paginator.textOf(index)
             Text(
-                text = paginator.textOf(index),
+                text = slice as? AnnotatedString ?: AnnotatedString(slice.toString()),
                 style = textStyle,
                 modifier = Modifier.fillMaxSize(),
             )
@@ -1176,6 +1232,7 @@ private fun ScrollReader(
     state: ReaderState,
     skin: ReaderSkin,
     textStyle: TextStyle,
+    headingStyle: SpanStyle,
     horizontalPadding: androidx.compose.ui.unit.Dp,
     verticalPadding: androidx.compose.ui.unit.Dp,
     topInset: androidx.compose.ui.unit.Dp,
@@ -1423,8 +1480,20 @@ private fun ScrollReader(
                         // The text between blocks is whitespace only, so drawing the
                         // blocks back to back with a paragraph gap reproduces the
                         // book's own spacing without a run of empty lines.
+                        //
+                        // Annotated rather than a plain substring: a heading is
+                        // usually the first *line* of a block rather than a block of
+                        // its own (the paragraph after it follows on the next line
+                        // with no blank line between), so the emphasis has to be a
+                        // span over the heading's range, exactly as in paged mode.
                         Text(
-                            text = content.text.substring(block.start, block.end),
+                            text = headingAnnotated(
+                                text = content.text,
+                                chapters = content.chapters,
+                                start = block.start,
+                                end = block.end,
+                                heading = headingStyle,
+                            ),
                             style = textStyle,
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -2487,6 +2556,9 @@ private fun ReaderOptionsPanel(
     font: ReaderFont,
     fontSize: Float,
     lineSpacing: Float,
+    chapterTitleScale: Float,
+    chapterTitleBold: Boolean,
+    readerMarginDp: Int,
     theme: ReaderTheme,
     textColorOverride: Int,
     backgroundColorOverride: Int,
@@ -2576,6 +2648,40 @@ private fun ReaderOptionsPanel(
                     onValueChange = { prefs.lineSpacing = it },
                     valueRange = 1.2f..2.4f,
                     steps = 11,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                // --- chapter heading ------------------------------------------
+                //
+                // The heading is part of the prose rather than chrome (see
+                // [headingAnnotated]), so it is a text setting and belongs here
+                // next to the size and the spacing it is a multiple of. The
+                // percentage is shown rather than the raw multiplier because
+                // "130%" is what the reader is actually choosing.
+                OptionLabel(String.format("章节标题 %.0f%%", chapterTitleScale * 100f), skin)
+                Slider(
+                    value = chapterTitleScale,
+                    onValueChange = { prefs.chapterTitleScale = it },
+                    valueRange = Prefs.MIN_TITLE_SCALE..Prefs.MAX_TITLE_SCALE,
+                    steps = 11,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OptionChip(
+                        label = if (chapterTitleBold) "标题加粗" else "标题常规",
+                        selected = chapterTitleBold,
+                        skin = skin,
+                        onClick = { prefs.chapterTitleBold = !chapterTitleBold },
+                    )
+                }
+
+                // --- margins --------------------------------------------------
+                OptionLabel("页边距 +${readerMarginDp} dp", skin)
+                Slider(
+                    value = readerMarginDp.toFloat(),
+                    onValueChange = { prefs.readerMarginDp = it.toInt() },
+                    valueRange = 0f..Adapt.READER_PADDING_EXTRA_MAX_DP.toFloat(),
+                    steps = 7,
                     modifier = Modifier.fillMaxWidth(),
                 )
 
@@ -2765,6 +2871,45 @@ private fun ColorRow(
             }
         }
     }
+}
+
+/**
+ * The book text in `[start, end)` with the chapter headings inside it emphasised.
+ *
+ * A chapter's heading is not a node of its own -- it is the first line of the
+ * chapter's prose (see [Chapters]). Drawing it larger and bolder therefore means
+ * annotating the range it occupies rather than styling a separate view, and this
+ * one function feeds both the paginator and the renderer: the page is measured
+ * from exactly the string it is later drawn from, so a bigger heading cannot
+ * push the last line of a page out of view.
+ *
+ * The range is *not* required to begin at a heading. Paged mode passes a whole
+ * chapter, which does; scrolling mode passes a paragraph, which may start
+ * anywhere -- including half-way through the chapter, where there is no heading
+ * to find and the string goes through unchanged.
+ */
+private fun headingAnnotated(
+    text: String,
+    chapters: List<Chapters.Chapter>,
+    start: Int,
+    end: Int,
+    heading: SpanStyle,
+): AnnotatedString {
+    val base = AnnotatedString(text.substring(start, end))
+    val spans = ArrayList<AnnotatedString.Range<SpanStyle>>()
+    for (chapter in chapters) {
+        // Chapters are ordered by position, so once one starts past the end of
+        // this range nothing later can be inside it.
+        if (chapter.start >= end) break
+        if (chapter.start < start) continue
+        val headingEnd = Chapters.headingLineEnd(text, chapter).coerceAtMost(end)
+        if (headingEnd > chapter.start) {
+            spans.add(
+                AnnotatedString.Range(heading, chapter.start - start, headingEnd - start)
+            )
+        }
+    }
+    return if (spans.isEmpty()) base else AnnotatedString(base.text, spans)
 }
 
 /**

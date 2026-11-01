@@ -15,6 +15,32 @@ rather than trusted.
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-11-01
+
+### Added
+
+- **阅读界面里正文章节名加大加粗。** 每章正文开头的那一行标题（「第一章 ×××」）此前和
+  正文一样大小、一样粗细，夹在段落里几乎找不出来。现在它按设置放大并加粗，一眼能看出
+  章节从哪里开始。
+
+  实现上有个坑：章节标题不是独立的一段，它就是章节正文切片的**第一行**。放大之后，分页
+  测量和绘制必须使用同一份带样式的文本——否则测量按旧字号算出行数、绘制按新字号画，最后
+  一两行会被裁掉。现在分页器内部保留带标注的字符串，两边一致。
+
+- **阅读设置新增三项。** 阅读设置面板（以及设置页的「阅读」卡片）新增：
+
+  - **章节标题字号**：100%–160%，默认 130%。
+  - **章节标题加粗**：默认开启，关掉后只保留放大。
+  - **页边距**：左右各再多留 0–40 dp。它**叠加**在自适应边距之上——平板上的正文列宽本来
+    就有上限，多加的是留白而不是把列拉宽；手机上不设置时，布局与以前完全一致。
+
+- **文字颜色新增四种深色**：墨绿、枣红、靛蓝、深褐，浅色页面下多了几种区分方式。
+
+### Tooling
+
+- `tools/check-book-logic.cmd` 新增章节标题行范围（`Chapters.headingLineEnd`）与页边距
+  叠加（`Adapt.readerHorizontalPaddingDp`）的检查，并把色板一致性检查扩到 16 种文字颜色。
+
 ## [1.1.1] - 2026-10-19
 
 ### Fixed
@@ -976,7 +1002,8 @@ rather than trusted.
 - 设置: reading preferences, app theme, library source, storage management and a
   GitHub update check that verifies the APK's SHA-256 before installing.
 
-[Unreleased]: https://github.com/nmaych/Readon/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/nmaych/Readon/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/nmaych/Readon/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/nmaych/Readon/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/nmaych/Readon/compare/v1.0.11...v1.1.0
 [1.0.11]: https://github.com/nmaych/Readon/compare/v1.0.10...v1.0.11

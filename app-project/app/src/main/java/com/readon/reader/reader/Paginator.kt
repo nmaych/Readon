@@ -89,8 +89,13 @@ class TextPaginator(
     ): Boolean {
         if (end <= start) return true
         val slice = text.subSequence(start, end)
+        // Keep whatever the caller annotated the text with. The reader marks a
+        // chapter's heading with a larger, bolder span, and measuring the page
+        // without it would mean measuring one layout and drawing another -- which
+        // is precisely the mismatch that clips the last line of a page.
+        val annotated = slice as? AnnotatedString ?: AnnotatedString(slice.toString())
         val result = measurer.measure(
-            text = AnnotatedString(slice.toString()),
+            text = annotated,
             style = style,
             constraints = Constraints(maxWidth = maxWidth.coerceAtLeast(1)),
         )
@@ -176,14 +181,22 @@ class Paginator(
 
     fun page(index: Int): PageSlice = cursor.page(index)
 
-    fun textOf(index: Int): String {
+    /**
+     * The text of page [index], carrying whatever annotations the source has.
+     *
+     * A [CharSequence] rather than a [String] because the reader's chapter
+     * headings are a span on the source text: flattening the page to a String here
+     * would drop it and the heading would be drawn the same size as the prose --
+     * and, worse, drawn differently from the way it was measured.
+     */
+    fun textOf(index: Int): CharSequence {
         val p = page(index)
         if (p.start >= p.end || p.start >= text.length) return ""
         // Trailing whitespace is not drawn, so it is trimmed here rather than
         // being handed to the text layout as a run of empty lines.
         val end = TextFlow.trimEnd(text, p.start, p.end)
         if (end <= p.start) return ""
-        return text.subSequence(p.start, end).toString()
+        return text.subSequence(p.start, end)
     }
 
     /** Keep a page's top visible; used to reflow after a viewport change. */

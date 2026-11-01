@@ -156,6 +156,41 @@ class Prefs(context: Context) {
         set(v) = edit { putFloat(K_LINE_SPACING, v) }
 
     /**
+     * How much larger a chapter heading is drawn than the body text, as a
+     * multiple of [fontSize].
+     *
+     * The heading is the chapter's own first line rather than a view of its own,
+     * so this ends up as a span over that line. Clamped on read as well as on
+     * write: a stored value outside the range would either be invisible or
+     * overrun the page. 1.0 turns the size emphasis off without losing the
+     * setting.
+     */
+    var chapterTitleScale: Float
+        get() = sp.getFloat(K_TITLE_SCALE, DEFAULT_TITLE_SCALE)
+            .coerceIn(MIN_TITLE_SCALE, MAX_TITLE_SCALE)
+        set(v) = edit { putFloat(K_TITLE_SCALE, v.coerceIn(MIN_TITLE_SCALE, MAX_TITLE_SCALE)) }
+
+    /** Draw chapter headings in bold as well as larger. */
+    var chapterTitleBold: Boolean
+        get() = sp.getBoolean(K_TITLE_BOLD, true)
+        set(v) = edit { putBoolean(K_TITLE_BOLD, v) }
+
+    /**
+     * Extra left/right margin for the reading column, in dp.
+     *
+     * *Additional* to the margin [com.readon.reader.ui.Adapt] derives from the
+     * window width -- that one caps the text column on a tablet, this one is the
+     * reader's own preference on top of it. Clamped on read as well as on write so
+     * a hand-edited value cannot squeeze the column away.
+     */
+    var readerMarginDp: Int
+        get() = sp.getInt(K_READER_MARGIN, 0)
+            .coerceIn(0, com.readon.reader.ui.Adapt.READER_PADDING_EXTRA_MAX_DP)
+        set(v) = edit {
+            putInt(K_READER_MARGIN, v.coerceIn(0, com.readon.reader.ui.Adapt.READER_PADDING_EXTRA_MAX_DP))
+        }
+
+    /**
      * The body typeface.
      *
      * Stored as the enum name, and resolved against the legacy [serif] flag when
@@ -330,6 +365,11 @@ class Prefs(context: Context) {
         const val PAGE_ANIM_SLIDE = 0
         const val PAGE_ANIM_NONE = 1
 
+        /** Chapter-heading size relative to the body text; 1.0 is "same size". */
+        const val MIN_TITLE_SCALE = 1.0f
+        const val MAX_TITLE_SCALE = 1.6f
+        const val DEFAULT_TITLE_SCALE = 1.3f
+
         private const val K_OWNER = "owner"
         private const val K_REPO = "repo"
         private const val K_BRANCH = "branch"
@@ -342,6 +382,9 @@ class Prefs(context: Context) {
         private const val K_READER_THEME = "reader_theme"
         private const val K_FONT_SIZE = "font_size"
         private const val K_LINE_SPACING = "line_spacing"
+        private const val K_TITLE_SCALE = "chapter_title_scale"
+        private const val K_TITLE_BOLD = "chapter_title_bold"
+        private const val K_READER_MARGIN = "reader_margin_dp"
         private const val K_SERIF = "serif"
         private const val K_READER_FONT = "reader_font"
         private const val K_READER_TEXT_COLOR = "reader_text_color"
