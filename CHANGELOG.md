@@ -15,6 +15,8 @@ rather than trusted.
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-11-18
+
 ### Fixed
 
 - **段落中间的章节标记也能识别。** 有些文件的「第一章」不在单独一行：它被粘在上一章正文的
@@ -1058,7 +1060,8 @@ rather than trusted.
 - 设置: reading preferences, app theme, library source, storage management and a
   GitHub update check that verifies the APK's SHA-256 before installing.
 
-[Unreleased]: https://github.com/nmaych/Readon/compare/v1.1.3...HEAD
+[Unreleased]: https://github.com/nmaych/Readon/compare/v1.1.4...HEAD
+[1.1.4]: https://github.com/nmaych/Readon/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/nmaych/Readon/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/nmaych/Readon/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/nmaych/Readon/compare/v1.1.0...v1.1.1
