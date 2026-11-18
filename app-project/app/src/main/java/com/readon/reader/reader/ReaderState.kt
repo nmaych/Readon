@@ -214,9 +214,6 @@ class ReaderState {
         status = Status.Failed(message)
     }
 
-    /** Character offset of the reader's current position in the whole book. */
-    fun currentOffset(pageStart: Int): Int = pageStart
-
     /** How far through the book the reader is, 0f..1f. */
     fun readingFraction(): Float = progress(currentOffset)
 

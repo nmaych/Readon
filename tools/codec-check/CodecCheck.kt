@@ -175,9 +175,125 @@ fun main() {
     check("目录未被误当作章节", tocChapters.size in 1..45, "${tocChapters.size}")
     check("章节正文非空", tocChapters.all { it.end - it.start > 0 })
 
+    // The first entry of a table of contents is not a chapter either. It used to
+    // be exempt from the "too close to the next heading" rule, so every book with
+    // a 目录 got a duplicate chapter 1 that spanned the rest of the contents.
+    check(
+        "目录的第一条也不成章",
+        tocChapters.count { it.title == "第1章 标题" } == 1,
+        "${tocChapters.count { it.title == "第1章 标题" }}",
+    )
+    val realFirst = withToc.indexOf("第1章 标题", withToc.indexOf("第1章 标题") + 1)
+    check(
+        "目录之后的第 1 章从正文开始",
+        tocChapters.first { it.title == "第1章 标题" }.start == realFirst,
+        "${tocChapters.first { it.title == "第1章 标题" }.start} vs $realFirst",
+    )
+
+    // A heading is a whole line, not a prefix. Each of these lines begins with a
+    // chapter marker and is prose; believing them puts a wrong turn in the
+    // outline, which is worse than having no outline at all.
+    fun bookOf(vararg headings: String) = buildString {
+        for (h in headings) {
+            append(h).append('\n')
+            append("正文。".repeat(100))
+            append("\n\n")
+        }
+    }
+    val proseLines = listOf(
+        "第一章我就看过了，写得很差。",              // a sentence about the chapter
+        "第一章的开头，作者用了大量的笔墨描写，",      // a hard-wrapped line ending in a comma
+        "　　第一章 这是缩进的正文段落，不是标题。",   // a paragraph, indented the way prose is
+        "第一章" + "很长".repeat(30),                 // too long to be a label
+        "前言不搭后语。",                             // an idiom that starts with a heading word
+    )
+    for (line in proseLines) {
+        val withProse = bookOf("第一章 起点", line, "第二章 收束")
+        check("正文行不被当作章节：${line.take(12)}", Chapters.split(withProse).size == 2, line)
+    }
+    // …while the same shape with a real title still is one.
+    check("无分隔的标题仍被识别", Chapters.split(bookOf("第一章风起", "第二章 收束")).size == 2)
+    check("无分隔且以代词开头的标题仍被识别", Chapters.split(bookOf("第一章我来了", "第二章 收束")).size == 2)
+    check("标题中的章号可以带空格", Chapters.split(bookOf("第 12 章 归途", "第 13 章 出发")).size == 2)
+    // 第一章的写法 is a sentence about a chapter, not a chapter. With no separator
+    // between the marker and the text, the first character is the only evidence.
+    check("无分隔的句子不被当作标题", Chapters.split(bookOf("第一章 起点", "第一章的写法", "第二章 收束")).size == 2)
+
+    // A book whose headings are all indented still deserves an outline: the
+    // indentation rule is a preference, not a veto.
+    val indentedBook = buildString {
+        for (i in 1..10) {
+            append("　　第${i}章 标题$i\n")
+            append("正文内容。".repeat(80))
+            append("\n\n")
+        }
+    }
+    check("整本缩进的标题仍能识别", Chapters.split(indentedBook).size == 10, "${Chapters.split(indentedBook).size}")
+
+    // Standalone headings, and the ones that carry a number.
+    val namedBook = bookOf("楔子", "第一章 起点", "番外一 后来", "尾声")
+    check(
+        "楔子/番外/尾声 被识别",
+        Chapters.split(namedBook).map { it.title } == listOf("楔子", "第一章 起点", "番外一 后来", "尾声"),
+        "${Chapters.split(namedBook).map { it.title }}",
+    )
+
+    // CRLF files reach split only after BookLoader normalises newlines, but the
+    // detector must not depend on that: a stray \r is whitespace, not content.
+    val crlf = buildString {
+        for (i in 1..10) {
+            append("第${i}章 标题\r\n")
+            append("正文。".repeat(100))
+            append("\r\n\r\n")
+        }
+    }
+    check("CRLF 行尾不影响识别", Chapters.split(crlf).size == 10, "${Chapters.split(crlf).size}")
+
+    // Markdown headings: the hash is the marker, not part of the title the
+    // chapter list shows -- but the emphasised range still covers the whole line.
+    val markdown = buildString {
+        append("# 书名\n\n")
+        for (i in 1..12) {
+            append("## 第${i}章 标题$i\n")
+            append("正文。".repeat(100))
+            append("\n\n")
+        }
+    }
+    val mdChapters = Chapters.split(markdown)
+    check(
+        "Markdown 标题被识别",
+        (1..12).all { i -> mdChapters.any { it.title == "第${i}章 标题$i" } },
+        "${mdChapters.map { it.title }}",
+    )
+    check("Markdown 标题不带井号", mdChapters.none { it.title.startsWith("#") }, "${mdChapters.first().title}")
+    // The book's own "# 书名" line is dropped as a contents entry and becomes the
+    // 前言 chapter, exactly as an unnumbered title page would.
+    val mdFirst = mdChapters.first { it.title == "第1章 标题1" }
+    check(
+        "Markdown 标题行范围含井号",
+        markdown.substring(mdFirst.start, Chapters.headingLineEnd(markdown, mdFirst)) == "## 第1章 标题1",
+        markdown.substring(mdFirst.start, Chapters.headingLineEnd(markdown, mdFirst)),
+    )
+
+    // Degenerate input: no headings, no crash.
+    check("空文本没有章节", Chapters.split("").isEmpty())
+    check("纯空白没有章节", Chapters.split("\n\n \n\t\n").isEmpty())
+
     if (chapters.size > 3) {
         val target = chapters[2].start + 5
         check("indexAt 定位正确", Chapters.indexAt(chapters, target) == chapters[2].index)
+        // indexAt is a binary search now; every chapter boundary has to land in
+        // the right place, not just the one the old linear scan was probed with.
+        check("indexAt 命中每章开头", chapters.all { Chapters.indexAt(chapters, it.start) == it.index })
+        check("indexAt 命中章内任意位置", chapters.all { Chapters.indexAt(chapters, (it.start + it.end) / 2) == it.index })
+        check("indexAt 越界回落到末章", Chapters.indexAt(chapters, novel.length + 100) == chapters.last().index)
+        check("indexAt 负数回落到首章", Chapters.indexAt(chapters, -5) == chapters.first().index)
+        check("空列表 indexAt 为 -1", Chapters.indexAt(emptyList(), 0) == -1)
+        check(
+            "firstAtOrAfter 定位章节",
+            chapters.withIndex().all { (i, c) -> Chapters.firstAtOrAfter(chapters, c.start) == i },
+        )
+        check("firstAtOrAfter 越过末章返回 size", Chapters.firstAtOrAfter(chapters, novel.length) == chapters.size)
     }
 
     // The reader emphasises a chapter's first line, and that range has to be the
@@ -210,6 +326,22 @@ fun main() {
     val elapsedMs = (System.nanoTime() - start) / 1_000_000
     println("  [info] ${huge.length} 字符切分耗时 ${elapsedMs}ms，章节 ${hugeChapters.size}")
     check("大书切分在 5 秒内完成", elapsedMs < 5000, "${elapsedMs}ms")
+    // A serialized novel passes the old 2000-chapter ceiling easily, and passing
+    // it used to discard the outline entirely -- so the longest books were the
+    // ones with no chapters at all.
+    check("三千章的长篇仍有大纲", hugeChapters.size == 3000, "${hugeChapters.size}")
+
+    // The worst case for the scan: a large book with no headings at all, where
+    // the indentation fallback means the text is walked a second time. Built from
+    // many lines rather than one huge one, so the line walk itself is exercised.
+    val plainHuge = buildString {
+        repeat(200_000) { append("只是一段很长的文字，没有任何章节标题。\n") }
+    }
+    val plainStart = System.nanoTime()
+    val plainChapters = Chapters.split(plainHuge)
+    val plainMs = (System.nanoTime() - plainStart) / 1_000_000
+    println("  [info] ${plainHuge.length} 字符、${plainHuge.count { it == '\n' }} 行的无章节书耗时 ${plainMs}ms")
+    check("无章节的大书也快", plainChapters.isEmpty() && plainMs < 5000, "${plainMs}ms")
 
     // -----------------------------------------------------------------------
     // Page bookkeeping -- the "显示正在排版后闪退" crash.

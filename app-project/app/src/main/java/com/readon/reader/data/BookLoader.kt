@@ -316,7 +316,11 @@ class BookLoader(
             if (body.isEmpty()) continue
             val start = sb.length
             sb.append(title).append('\n').append(body).append("\n\n")
-            chapters.add(Chapters.Chapter(title, start, sb.length, index))
+            // The heading range is the title line this loop just wrote, recorded
+            // rather than searched for later: an EPUB's title is not necessarily
+            // what [Chapters] would recognise as a heading, so there is nothing to
+            // search *for*.
+            chapters.add(Chapters.Chapter(title, start, sb.length, index, start + title.length))
             index++
         }
 

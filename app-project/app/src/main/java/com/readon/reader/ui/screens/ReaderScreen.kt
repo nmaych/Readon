@@ -2897,17 +2897,23 @@ private fun headingAnnotated(
 ): AnnotatedString {
     val base = AnnotatedString(text.substring(start, end))
     val spans = ArrayList<AnnotatedString.Range<SpanStyle>>()
-    for (chapter in chapters) {
+    // Scrolling mode calls this once per paragraph, so the walk starts at the
+    // first chapter that can be inside the range rather than at the top of the
+    // book: with a serialized novel's outline, that is thousands of comparisons
+    // per paragraph, per frame.
+    var i = Chapters.firstAtOrAfter(chapters, start)
+    while (i < chapters.size) {
+        val chapter = chapters[i]
         // Chapters are ordered by position, so once one starts past the end of
         // this range nothing later can be inside it.
         if (chapter.start >= end) break
-        if (chapter.start < start) continue
         val headingEnd = Chapters.headingLineEnd(text, chapter).coerceAtMost(end)
         if (headingEnd > chapter.start) {
             spans.add(
                 AnnotatedString.Range(heading, chapter.start - start, headingEnd - start)
             )
         }
+        i++
     }
     return if (spans.isEmpty()) base else AnnotatedString(base.text, spans)
 }
