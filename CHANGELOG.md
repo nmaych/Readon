@@ -15,6 +15,8 @@ rather than trusted.
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-11-18
+
 ### Fixed
 
 - **章节识别改为整行匹配，正文和目录不再被当成章节。** 原来的判断只看行的开头：一行以
@@ -1039,7 +1041,8 @@ rather than trusted.
 - 设置: reading preferences, app theme, library source, storage management and a
   GitHub update check that verifies the APK's SHA-256 before installing.
 
-[Unreleased]: https://github.com/nmaych/Readon/compare/v1.1.2...HEAD
+[Unreleased]: https://github.com/nmaych/Readon/compare/v1.1.3...HEAD
+[1.1.3]: https://github.com/nmaych/Readon/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/nmaych/Readon/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/nmaych/Readon/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/nmaych/Readon/compare/v1.0.11...v1.1.0
