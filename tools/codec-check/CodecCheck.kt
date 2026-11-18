@@ -230,6 +230,98 @@ fun main() {
     }
     check("整本缩进的标题仍能识别", Chapters.split(indentedBook).size == 10, "${Chapters.split(indentedBook).size}")
 
+    // -----------------------------------------------------------------------
+    // Headings that are not on a line of their own.
+    //
+    // Real files glue the marker to the end of the previous chapter, or have no
+    // line breaks at all -- in which case *every* heading is in the middle of a
+    // paragraph. These are the cases the line-based scan could not see.
+    // -----------------------------------------------------------------------
+    val inlineBook = buildString {
+        for (i in 1..6) {
+            append("上一章的正文。".repeat(30))
+            append("第${i}章 风起$i 新的正文从这里开始，一直写下去。")
+            append("后面的正文。".repeat(30))
+            append("\n\n")
+        }
+    }
+    val inlineChapters = Chapters.split(inlineBook).filter { it.title != "前言" }
+    check(
+        "段落中间的标记被识别",
+        inlineChapters.map { it.title } == (1..6).map { "第${it}章 风起$it" },
+        "${inlineChapters.map { it.title }}",
+    )
+    check(
+        "章节从标记处开始",
+        inlineChapters.all { it.start == inlineBook.indexOf(it.title) },
+        "${inlineChapters.map { it.start }}",
+    )
+    check(
+        "段中标题只高亮标题本身",
+        inlineChapters.all {
+            inlineBook.substring(it.start, Chapters.headingLineEnd(inlineBook, it)) == it.title
+        },
+        inlineBook.substring(
+            inlineChapters[0].start,
+            Chapters.headingLineEnd(inlineBook, inlineChapters[0]),
+        ),
+    )
+
+    // A file with no line breaks at all: one "paragraph" holding the whole novel.
+    val oneLine = buildString {
+        for (i in 1..5) {
+            append("正文。".repeat(60))
+            append("第${i}章 标题$i 内容从这里继续。")
+            append("后续内容。".repeat(30))
+        }
+    }
+    check("整本没有换行也能切分", Chapters.split(oneLine).count { it.title != "前言" } == 5, "${Chapters.split(oneLine).size}")
+
+    // A heading at the start of a line that carries on into prose: the label is
+    // the first word, not the paragraph.
+    val glued = buildString {
+        for (i in 1..5) {
+            append("第${i}章 风起$i 张三醒来的时候，天还没亮。")
+            append("正文。".repeat(60))
+            append("\n\n")
+        }
+    }
+    val gluedChapters = Chapters.split(glued)
+    check(
+        "标题后紧跟正文时只取标题",
+        gluedChapters.map { it.title } == (1..5).map { "第${it}章 风起$it" },
+        "${gluedChapters.map { it.title }}",
+    )
+
+    // A two-part title on a line of its own keeps both halves: only prose after
+    // the label is dropped, and this is a label.
+    val twoPart = Chapters.split(bookOf("第一章 风起云涌 天地变色", "第二章 收束"))
+    check(
+        "两段式标题完整保留",
+        twoPart.firstOrNull()?.title == "第一章 风起云涌 天地变色",
+        "${twoPart.map { it.title }}",
+    )
+
+    // …but a sentence that merely starts with a marker is still prose. Each of
+    // these has the shape of an inline heading and only the wording tells them
+    // apart.
+    val quoted = buildString {
+        for (i in 1..5) {
+            append("第${i}章 起点\n")
+            append("正文。".repeat(40))
+            append("他翻到第三章，又翻回来。见第三章第二节。第三章讲的是另一件事。第三章的内容很长。")
+            append("正文。".repeat(40))
+            append("\n\n")
+        }
+    }
+    val quotedChapters = Chapters.split(quoted)
+    check("正文里的章节引用不成章", quotedChapters.size == 5, "${quotedChapters.map { it.title }}")
+    check(
+        "正文里的章节引用没有被当成标题",
+        quotedChapters.none { it.title.contains("讲") || it.title.contains("的内容") },
+        "${quotedChapters.map { it.title }}",
+    )
+
     // Standalone headings, and the ones that carry a number.
     val namedBook = bookOf("楔子", "第一章 起点", "番外一 后来", "尾声")
     check(
